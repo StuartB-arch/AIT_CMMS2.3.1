@@ -20232,7 +20232,24 @@ class AITCMMSSystem:
 
         def update_equipment():
             """Update equipment in database with Cannot Find support"""
+            import os
+            log_file = os.path.expanduser("~/Desktop/equipment_update_debug.log")
+
+            def log_update(message):
+                """Write debug message to log file"""
+                try:
+                    with open(log_file, 'a') as f:
+                        from datetime import datetime as dt
+                        timestamp = dt.now().strftime('%Y-%m-%d %H:%M:%S')
+                        f.write(f"[{timestamp}] {message}\n")
+                except:
+                    pass
+
             try:
+                log_update("="*80)
+                log_update(f"UPDATE EQUIPMENT STARTED")
+                log_update(f"Original BFM: '{bfm_no}' (length: {len(bfm_no)})")
+
                 # Validate and parse First PM Date
                 first_pm_date_str = first_pm_date_var.get().strip()
                 next_weekly = None
@@ -20300,21 +20317,29 @@ class AITCMMSSystem:
                         pic2_data = f.read()
 
                 # Use connection pool for database operations
+                log_update("Starting database transaction")
                 with db_pool.get_cursor(commit=True) as cursor:
                     # Get the new BFM number from the entry (might be changed)
                     new_bfm_no = entries["BFM Equipment No:"].get().strip()
+                    log_update(f"New BFM: '{new_bfm_no}' (length: {len(new_bfm_no)})")
 
                     # Check if BFM number has changed
                     bfm_changed = (new_bfm_no != bfm_no)
+                    log_update(f"BFM Changed: {bfm_changed}")
 
                     # If BFM changed, verify the new BFM doesn't already exist
                     if bfm_changed:
+                        log_update(f"Checking if new BFM '{new_bfm_no}' already exists...")
                         cursor.execute('SELECT COUNT(*) FROM equipment WHERE bfm_equipment_no = %s', (new_bfm_no,))
                         if cursor.fetchone()[0] > 0:
                             messagebox.showerror("Error", f"BFM Equipment No '{new_bfm_no}' already exists. Please use a unique BFM number.")
                             return
 
                     # Update equipment table including photos, BFM number, and next PM dates
+                    log_update(f"Executing UPDATE statement")
+                    log_update(f"WHERE clause searching for BFM: '{bfm_no}'")
+                    log_update(f"New status: {new_status}")
+
                     cursor.execute('''
                         UPDATE equipment
                         SET sap_material_no = %s,
@@ -20358,7 +20383,10 @@ class AITCMMSSystem:
 
                     # Check if the UPDATE affected any rows
                     rows_updated = cursor.rowcount
+                    log_update(f"UPDATE completed. Rows affected: {rows_updated}")
+
                     if rows_updated == 0:
+                        log_update(f"ERROR: No rows updated! Equipment '{bfm_no}' not found in database")
                         raise Exception(f"Equipment with BFM '{bfm_no}' not found in database. The equipment may have been deleted by another user. Please refresh and try again.")
 
                     # If BFM changed, update all related tables with foreign keys
@@ -20568,6 +20596,9 @@ class AITCMMSSystem:
                     self.update_status(f"Equipment {new_bfm_no} reactivated")
             
             except Exception as e:
+                import traceback
+                log_update(f"EXCEPTION OCCURRED: {type(e).__name__}: {str(e)}")
+                log_update(f"Full traceback:\n{traceback.format_exc()}")
                 messagebox.showerror("Error", f"Failed to update equipment: {str(e)}")
 
         # Buttons
