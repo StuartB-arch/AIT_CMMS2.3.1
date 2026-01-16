@@ -20330,10 +20330,13 @@ class AITCMMSSystem:
                     # If BFM changed, verify the new BFM doesn't already exist
                     if bfm_changed:
                         log_update(f"Checking if new BFM '{new_bfm_no}' already exists...")
-                        cursor.execute('SELECT COUNT(*) FROM equipment WHERE bfm_equipment_no = %s', (new_bfm_no,))
-                        if cursor.fetchone()[0] > 0:
+                        cursor.execute('SELECT COUNT(*) as count FROM equipment WHERE bfm_equipment_no = %s', (new_bfm_no,))
+                        result = cursor.fetchone()
+                        if result['count'] > 0:
+                            log_update(f"New BFM already exists! Count: {result['count']}")
                             messagebox.showerror("Error", f"BFM Equipment No '{new_bfm_no}' already exists. Please use a unique BFM number.")
                             return
+                        log_update(f"New BFM is unique, proceeding with update")
 
                     # Update equipment table including photos, BFM number, and next PM dates
                     log_update(f"Executing UPDATE statement")
