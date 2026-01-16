@@ -20356,6 +20356,11 @@ class AITCMMSSystem:
                         bfm_no  # OLD BFM number in WHERE clause
                     ))
 
+                    # Check if the UPDATE affected any rows
+                    rows_updated = cursor.rowcount
+                    if rows_updated == 0:
+                        raise Exception(f"Equipment with BFM '{bfm_no}' not found in database. The equipment may have been deleted by another user. Please refresh and try again.")
+
                     # If BFM changed, update all related tables with foreign keys
                     if bfm_changed:
                         # Update cannot_find_assets
