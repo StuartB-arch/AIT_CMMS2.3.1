@@ -1328,7 +1328,11 @@ def generate_monthly_summary_report(conn, month=None, year=None):
         now = datetime.now()
         month = month or now.month
         year = year or now.year
-    
+
+    # Ensure month and year are integers
+    month = int(month)
+    year = int(year)
+
     month_name = calendar.month_name[month]
     
     # Calculate date range for the month
@@ -2508,6 +2512,10 @@ def export_professional_monthly_report_pdf(conn, month=None, year=None):
             now = datetime.now()
             month = month or now.month
             year = year or now.year
+
+        # Ensure month and year are integers
+        month = int(month)
+        year = int(year)
 
         month_name = calendar.month_name[month]
 
