@@ -1472,9 +1472,20 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             WHERE EXTRACT(YEAR FROM completion_date::date) = %s
             AND EXTRACT(MONTH FROM completion_date::date) = %s
         ''', (year, month))
-    
+
         rtf_count = cursor.fetchone()[0] or 0
-    
+
+        # Get Deactivated entries count
+        cursor.execute('''
+            SELECT COUNT(*)
+            FROM deactivated_assets
+            WHERE EXTRACT(YEAR FROM deactivated_date::date) = %s
+            AND EXTRACT(MONTH FROM deactivated_date::date) = %s
+            AND status = 'Deactivated'
+        ''', (year, month))
+
+        deactivated_count = cursor.fetchone()[0] or 0
+
         # Get CM statistics
         # CMs created this month
         cursor.execute('''
@@ -1958,11 +1969,14 @@ def generate_monthly_summary_report(conn, month=None, year=None):
         print(f"  Note: PM Completions + Outstanding = {pm_completions + outstanding_completions} total completions")
         print()
     
-        # Display Cannot Find and Run to Failure separately
+        # Display Cannot Find, Run to Failure, and Deactivated separately
         print("OTHER ACTIVITY (Not counted in PM totals):")
         print(f"  Cannot Find Entries: {cf_count}")
         print(f"  Mark as Found Entries: {found_count}")
         print(f"  Run to Failure Entries: {rtf_count}")
+        print(f"  Deactivated Assets: {deactivated_count}")
+        print()
+        print(f"  Total Assets Excluded from PM Requirements: {cf_count + rtf_count + deactivated_count}")
         print()
 
         # Display detailed Cannot Find list if any assets were reported missing this month
@@ -2515,6 +2529,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             'total_pm_completions': pm_completions + outstanding_completions,
             'cannot_find_count': cf_count,
             'run_to_failure_count': rtf_count,
+            'deactivated_count': deactivated_count,
             'cms_created': cms_created,
             'cms_closed': cms_closed,
             'cms_open_current': cms_open_current,
@@ -2764,7 +2779,26 @@ def export_professional_monthly_report_pdf(conn, month=None, year=None):
             ORDER BY found_date DESC
         ''', (year, month))
         found_assets = cursor.fetchall()
-        
+
+        # Get Run to Failure entries count
+        cursor.execute('''
+            SELECT COUNT(*)
+            FROM run_to_failure_assets
+            WHERE EXTRACT(YEAR FROM completion_date::date) = %s
+            AND EXTRACT(MONTH FROM completion_date::date) = %s
+        ''', (year, month))
+        rtf_count = cursor.fetchone()[0] or 0
+
+        # Get Deactivated entries count
+        cursor.execute('''
+            SELECT COUNT(*)
+            FROM deactivated_assets
+            WHERE EXTRACT(YEAR FROM deactivated_date::date) = %s
+            AND EXTRACT(MONTH FROM deactivated_date::date) = %s
+            AND status = 'Deactivated'
+        ''', (year, month))
+        deactivated_count = cursor.fetchone()[0] or 0
+
         # Summary highlights table
         summary_data = [
             ['METRIC', 'VALUE'],
@@ -3683,12 +3717,51 @@ def export_professional_monthly_report_pdf(conn, month=None, year=None):
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f7fafc')])
             ]))
-        
+
             story.append(daily_table)
+
+        story.append(Spacer(1, 25))
+
+        # ==================== OTHER ACTIVITY SUMMARY ====================
+        story.append(Paragraph("OTHER ACTIVITY (Not counted in PM totals)", heading_style))
+        story.append(Spacer(1, 10))
+
+        other_activity_data = [
+            ['ACTIVITY TYPE', 'COUNT'],
+            ['Cannot Find Entries', f'{cf_count:,}'],
+            ['Mark as Found Entries', f'{found_count:,}'],
+            ['Run to Failure Entries', f'{rtf_count:,}'],
+            ['Deactivated Assets', f'{deactivated_count:,}'],
+            ['Total Assets Excluded from PM Requirements', f'{cf_count + rtf_count + deactivated_count:,}']
+        ]
+
+        other_table = Table(other_activity_data, colWidths=[4*inch, 2*inch])
+        other_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c5282')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('ALIGN', (1, 1), (1, -1), 'RIGHT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 11),
+            ('BACKGROUND', (0, 1), (-1, 4), colors.white),
+            ('BACKGROUND', (0, 5), (-1, 5), colors.HexColor('#e6f2ff')),
+            ('FONTNAME', (0, 5), (-1, 5), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#cbd5e0')),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('ROWBACKGROUNDS', (0, 1), (-1, 4), [colors.white, colors.HexColor('#f7fafc')])
+        ]))
+
+        story.append(other_table)
+        story.append(Spacer(1, 25))
 
         # ==================== CANNOT FIND ASSETS ====================
         if cf_count > 0:
-            story.append(Spacer(1, 25))
             story.append(Paragraph("CANNOT FIND ASSETS REPORTED", heading_style))
             story.append(Spacer(1, 10))
 
