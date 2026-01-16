@@ -2036,9 +2036,11 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             print(f"{'PM Type':<15} {'Count':<10} {'Total Hours':<15} {'Avg Hours':<12}")
             print("-" * 55)
             for pm_type, count, total_hrs, avg_hrs in pm_types:
+                pm_type_str = pm_type if pm_type is not None else "N/A"
+                count_val = count if count is not None else 0
                 total_hrs_display = f"{total_hrs:.1f}h" if total_hrs else "0.0h"
                 avg_hrs_display = f"{avg_hrs:.1f}h" if avg_hrs else "0.0h"
-                print(f"{pm_type:<15} {count:<10} {total_hrs_display:<15} {avg_hrs_display:<12}")
+                print(f"{pm_type_str:<15} {count_val:<10} {total_hrs_display:<15} {avg_hrs_display:<12}")
             print()
     
         # 3. DAILY COMPLETION TRACKING (PM Completions only)
@@ -2063,9 +2065,11 @@ def generate_monthly_summary_report(conn, month=None, year=None):
         
             running_total = 0
             for date, count, hours in daily_data:
-                running_total += count
+                date_str = str(date) if date is not None else "N/A"
+                count_val = count if count is not None else 0
+                running_total += count_val
                 hours_display = f"{hours:.1f}h" if hours else "0.0h"
-                print(f"{date:<12} {count:<15} {hours_display:<12} {running_total:<15}")
+                print(f"{date_str:<12} {count_val:<15} {hours_display:<12} {running_total:<15}")
             print()
     
         # 4. TECHNICIAN PERFORMANCE (PM Completions only)
@@ -2152,9 +2156,10 @@ def generate_monthly_summary_report(conn, month=None, year=None):
                     # If no assigned PMs tracked, show count without percentage
                     rate_display = "N/A"
 
+                tech_str = tech if tech is not None else "Unassigned"
                 total_hrs_display = f"{total_hrs:.1f}h" if total_hrs else "0.0h"
                 avg_hrs_display = f"{avg_hrs:.1f}h" if avg_hrs else "0.0h"
-                print(f"{tech:<25} {assigned_count:<12} {count:<12} {cf_count:<14} {rate_display:<12} {total_hrs_display:<15} {avg_hrs_display:<12}")
+                print(f"{tech_str:<25} {assigned_count:<12} {count:<12} {cf_count:<14} {rate_display:<12} {total_hrs_display:<15} {avg_hrs_display:<12}")
             print()
     
         # 5. CM BREAKDOWN BY PRIORITY AND TECHNICIAN
@@ -2184,7 +2189,9 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             print(f"{'Priority':<15} {'Count':<10}")
             print("-" * 25)
             for priority, count in cm_priorities_created:
-                print(f"{priority:<15} {count:<10}")
+                priority_str = priority if priority is not None else "N/A"
+                count_val = count if count is not None else 0
+                print(f"{priority_str:<15} {count_val:<10}")
             print()
 
         # Now show CMs closed this month by priority with hours
@@ -2216,9 +2223,11 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             print(f"{'Priority':<15} {'Count':<10} {'Total Hours':<15} {'Avg Hours':<12}")
             print("-" * 55)
             for priority, count, total_hrs, avg_hrs in cm_priorities_closed:
+                priority_str = priority if priority is not None else "N/A"
+                count_val = count if count is not None else 0
                 total_hrs_display = f"{total_hrs:.1f}h" if total_hrs else "0.0h"
                 avg_hrs_display = f"{avg_hrs:.1f}h" if avg_hrs else "0.0h"
-                print(f"{priority:<15} {count:<10} {total_hrs_display:<15} {avg_hrs_display:<12}")
+                print(f"{priority_str:<15} {count_val:<10} {total_hrs_display:<15} {avg_hrs_display:<12}")
             print()
     
         # CM completion by technician
@@ -2243,9 +2252,11 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             print(f"{'Technician':<25} {'CMs Closed':<12} {'Total Hours':<15} {'Avg Hours':<12}")
             print("-" * 67)
             for tech, count, total_hrs, avg_hrs in cm_techs:
+                tech_str = tech if tech is not None else "Unassigned"
+                count_val = count if count is not None else 0
                 total_hrs_display = f"{total_hrs:.1f}h" if total_hrs else "0.0h"
                 avg_hrs_display = f"{avg_hrs:.1f}h" if avg_hrs else "0.0h"
-                print(f"{tech:<25} {count:<12} {total_hrs_display:<15} {avg_hrs_display:<12}")
+                print(f"{tech_str:<25} {count_val:<12} {total_hrs_display:<15} {avg_hrs_display:<12}")
             print()
     
         # 6. EQUIPMENT LOCATION SUMMARY (PM Completions only)
@@ -2269,8 +2280,10 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             print(f"{'Location':<30} {'Completions':<15} {'Total Hours':<12}")
             print("-" * 60)
             for location, count, hours in locations:
+                location_str = location if location is not None else "N/A"
+                count_val = count if count is not None else 0
                 hours_display = f"{hours:.1f}h" if hours else "0.0h"
-                print(f"{location:<30} {count:<15} {hours_display:<12}")
+                print(f"{location_str:<30} {count_val:<15} {hours_display:<12}")
             print()
 
         # ==================== EQUIPMENT MISSING PARTS SUMMARY ====================
@@ -20342,6 +20355,11 @@ class AITCMMSSystem:
                         pic2_data,
                         bfm_no  # OLD BFM number in WHERE clause
                     ))
+
+                    # Check if the UPDATE affected any rows
+                    rows_updated = cursor.rowcount
+                    if rows_updated == 0:
+                        raise Exception(f"Equipment with BFM '{bfm_no}' not found in database. The equipment may have been deleted by another user. Please refresh and try again.")
 
                     # If BFM changed, update all related tables with foreign keys
                     if bfm_changed:
