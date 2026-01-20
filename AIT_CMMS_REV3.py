@@ -6573,15 +6573,48 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        OPTION B: Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
-        This ensures technicians don't have to manually enter the scheduled date,
-        and the completion gets properly categorized in monthly reports.
+        ENHANCED: Auto-populate PM type AND PM Due Date from weekly_pm_schedules
+        This prevents errors where wrong PM type is selected (e.g., Monthly logged as Annual)
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
+        if bfm_no:
+            # CRITICAL FIX: Auto-populate PM type from schedule if not already selected
+            # This prevents Monthly PMs from being logged as Annual PMs
+            if not pm_type:
+                try:
+                    cursor = self.conn.cursor()
+                    # Find the most recent scheduled PM for this equipment
+                    cursor.execute('''
+                        SELECT pm_type, scheduled_date, assigned_technician
+                        FROM weekly_pm_schedules
+                        WHERE bfm_equipment_no = %s AND status = 'Scheduled'
+                        ORDER BY week_start_date DESC, scheduled_date DESC
+                        LIMIT 1
+                    ''', (bfm_no,))
+
+                    schedule_result = cursor.fetchone()
+                    if schedule_result:
+                        scheduled_pm_type = schedule_result[0]
+                        scheduled_date = schedule_result[1]
+                        assigned_tech = schedule_result[2]
+
+                        # Auto-fill PM type from schedule
+                        self.pm_type_var.set(scheduled_pm_type)
+                        self.pm_due_date_var.set(scheduled_date)
+
+                        # Also pre-fill technician if available
+                        if assigned_tech:
+                            self.completion_tech_var.set(assigned_tech)
+
+                        self.update_status(f"Auto-filled from schedule: {scheduled_pm_type} PM due {scheduled_date}")
+                        pm_type = scheduled_pm_type
+                except Exception as e:
+                    print(f"Warning: Could not retrieve scheduled PM: {e}")
+
         if bfm_no and pm_type:
-            # OPTION B: Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
+            # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
@@ -9412,15 +9445,48 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        OPTION B: Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
-        This ensures technicians don't have to manually enter the scheduled date,
-        and the completion gets properly categorized in monthly reports.
+        ENHANCED: Auto-populate PM type AND PM Due Date from weekly_pm_schedules
+        This prevents errors where wrong PM type is selected (e.g., Monthly logged as Annual)
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
+        if bfm_no:
+            # CRITICAL FIX: Auto-populate PM type from schedule if not already selected
+            # This prevents Monthly PMs from being logged as Annual PMs
+            if not pm_type:
+                try:
+                    cursor = self.conn.cursor()
+                    # Find the most recent scheduled PM for this equipment
+                    cursor.execute('''
+                        SELECT pm_type, scheduled_date, assigned_technician
+                        FROM weekly_pm_schedules
+                        WHERE bfm_equipment_no = %s AND status = 'Scheduled'
+                        ORDER BY week_start_date DESC, scheduled_date DESC
+                        LIMIT 1
+                    ''', (bfm_no,))
+
+                    schedule_result = cursor.fetchone()
+                    if schedule_result:
+                        scheduled_pm_type = schedule_result[0]
+                        scheduled_date = schedule_result[1]
+                        assigned_tech = schedule_result[2]
+
+                        # Auto-fill PM type from schedule
+                        self.pm_type_var.set(scheduled_pm_type)
+                        self.pm_due_date_var.set(scheduled_date)
+
+                        # Also pre-fill technician if available
+                        if assigned_tech:
+                            self.completion_tech_var.set(assigned_tech)
+
+                        self.update_status(f"Auto-filled from schedule: {scheduled_pm_type} PM due {scheduled_date}")
+                        pm_type = scheduled_pm_type
+                except Exception as e:
+                    print(f"Warning: Could not retrieve scheduled PM: {e}")
+
         if bfm_no and pm_type:
-            # OPTION B: Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
+            # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
@@ -11329,7 +11395,7 @@ class AITCMMSSystem:
         row += 1
         
         # PM Type
-        ttk.Label(form_frame, text="PM Type:").grid(row=row, column=0, sticky='w', pady=5)
+        ttk.Label(form_frame, text="PM Type (auto-filled from schedule):").grid(row=row, column=0, sticky='w', pady=5)
         self.pm_type_var = tk.StringVar()
         pm_type_combo = ttk.Combobox(form_frame, textvariable=self.pm_type_var,
                                    values=['Weekly', 'Monthly', 'Six Month', 'Annual'], width=20)
@@ -13986,7 +14052,7 @@ class AITCMMSSystem:
             if not validation_result['valid']:
                 # Show detailed warning dialog
                 response = messagebox.askyesno(
-                    "WARNING: Potential Duplicate PM Detected", 
+                    "WARNING: Potential Duplicate PM Detected",
                     f"{validation_result['message']}\n\n"
                     f"Details:\n"
                     f"- Equipment: {bfm_no}\n"
@@ -14005,6 +14071,50 @@ class AITCMMSSystem:
                         pass
                     self.update_status("PM submission cancelled - potential duplicate detected")
                     return
+
+            # CRITICAL FIX: Validate PM type matches the weekly schedule
+            # This prevents Monthly PMs from being logged as Annual PMs
+            try:
+                cursor.execute('''
+                    SELECT pm_type, assigned_technician, scheduled_date
+                    FROM weekly_pm_schedules
+                    WHERE bfm_equipment_no = %s AND status = 'Scheduled'
+                    ORDER BY week_start_date DESC, scheduled_date DESC
+                    LIMIT 1
+                ''', (bfm_no,))
+
+                scheduled_pm = cursor.fetchone()
+                if scheduled_pm:
+                    scheduled_pm_type = scheduled_pm[0]
+                    scheduled_tech = scheduled_pm[1]
+                    scheduled_date = scheduled_pm[2]
+
+                    # Warn if PM type doesn't match schedule
+                    if pm_type != scheduled_pm_type:
+                        response = messagebox.askyesno(
+                            "WARNING: PM Type Mismatch Detected",
+                            f"The PM type you selected does NOT match the schedule!\n\n"
+                            f"You selected: {pm_type}\n"
+                            f"Schedule shows: {scheduled_pm_type}\n\n"
+                            f"Equipment: {bfm_no}\n"
+                            f"Scheduled for: {scheduled_date}\n"
+                            f"Assigned to: {scheduled_tech}\n\n"
+                            f"This is the issue that caused Monthly PMs to be logged as Annual!\n\n"
+                            f"Do you want to proceed with '{pm_type}' anyway?\n"
+                            f"Click 'No' to go back and select '{scheduled_pm_type}' instead.",
+                            icon='warning'
+                        )
+                        if not response:
+                            try:
+                                self.conn.rollback()
+                            except:
+                                pass
+                            self.update_status(f"PM submission cancelled - please select '{scheduled_pm_type}' PM type")
+                            # Auto-correct the PM type for the user
+                            self.pm_type_var.set(scheduled_pm_type)
+                            return
+            except Exception as e:
+                print(f"Warning: Could not validate PM type against schedule: {e}")
 
             # Auto-calculate next annual PM date if blank
             if not next_annual_pm and pm_type in ['Monthly', 'Six Month', 'Annual']:
