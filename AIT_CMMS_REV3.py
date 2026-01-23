@@ -13569,7 +13569,7 @@ class AITCMMSSystem:
             file_path = filedialog.asksaveasfilename(
                 title="Export PM Frequency Report",
                 defaultextension=".xlsx",
-                initialname=default_filename,
+                initialfile=default_filename,
                 filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
             )
 
