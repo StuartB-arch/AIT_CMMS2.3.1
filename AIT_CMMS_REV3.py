@@ -13666,22 +13666,34 @@ class AITCMMSSystem:
                 final_last_annual = last_annual or actual_last_annual or ''
 
                 # Calculate/predict Next PM dates only for enabled frequencies
-                # Only show Next PM dates for frequencies that are actually enabled
+                # All dates are forward-looking from today's date
 
                 # Weekly PM - only if enabled
                 if weekly:
                     if next_weekly:
-                        final_next_weekly = next_weekly
+                        # Check if database date is in the future
+                        try:
+                            next_date = datetime.strptime(next_weekly, '%Y-%m-%d')
+                            if next_date >= current_date:
+                                final_next_weekly = next_weekly
+                            else:
+                                # Database date is in the past, calculate from today
+                                final_next_weekly = current_date.strftime('%Y-%m-%d')
+                        except:
+                            final_next_weekly = current_date.strftime('%Y-%m-%d')
                     elif final_last_weekly:
-                        # Predict from last completion + 7 days
+                        # Calculate next occurrence from last completion
                         try:
                             last_date = datetime.strptime(final_last_weekly, '%Y-%m-%d')
                             predicted_next = last_date + timedelta(days=7)
+                            # Ensure date is not in the past
+                            while predicted_next < current_date:
+                                predicted_next += timedelta(days=7)
                             final_next_weekly = predicted_next.strftime('%Y-%m-%d')
                         except:
-                            final_next_weekly = ''
+                            final_next_weekly = current_date.strftime('%Y-%m-%d')
                     else:
-                        # No history, predict from today
+                        # No history, start from today
                         final_next_weekly = current_date.strftime('%Y-%m-%d')
                 else:
                     final_next_weekly = ''
@@ -13689,17 +13701,29 @@ class AITCMMSSystem:
                 # Monthly PM - only if enabled
                 if monthly:
                     if next_monthly:
-                        final_next_monthly = next_monthly
+                        # Check if database date is in the future
+                        try:
+                            next_date = datetime.strptime(next_monthly, '%Y-%m-%d')
+                            if next_date >= current_date:
+                                final_next_monthly = next_monthly
+                            else:
+                                # Database date is in the past, calculate from today
+                                final_next_monthly = current_date.strftime('%Y-%m-%d')
+                        except:
+                            final_next_monthly = current_date.strftime('%Y-%m-%d')
                     elif final_last_monthly:
-                        # Predict from last completion + 30 days
+                        # Calculate next occurrence from last completion
                         try:
                             last_date = datetime.strptime(final_last_monthly, '%Y-%m-%d')
                             predicted_next = last_date + timedelta(days=30)
+                            # Ensure date is not in the past
+                            while predicted_next < current_date:
+                                predicted_next += timedelta(days=30)
                             final_next_monthly = predicted_next.strftime('%Y-%m-%d')
                         except:
-                            final_next_monthly = ''
+                            final_next_monthly = current_date.strftime('%Y-%m-%d')
                     else:
-                        # No history, predict from today
+                        # No history, start from today
                         final_next_monthly = current_date.strftime('%Y-%m-%d')
                 else:
                     final_next_monthly = ''
@@ -13707,17 +13731,29 @@ class AITCMMSSystem:
                 # Six Month PM - only if enabled
                 if six_month:
                     if next_six:
-                        final_next_six = next_six
+                        # Check if database date is in the future
+                        try:
+                            next_date = datetime.strptime(next_six, '%Y-%m-%d')
+                            if next_date >= current_date:
+                                final_next_six = next_six
+                            else:
+                                # Database date is in the past, calculate from today
+                                final_next_six = current_date.strftime('%Y-%m-%d')
+                        except:
+                            final_next_six = current_date.strftime('%Y-%m-%d')
                     elif final_last_six:
-                        # Predict from last completion + 180 days
+                        # Calculate next occurrence from last completion
                         try:
                             last_date = datetime.strptime(final_last_six, '%Y-%m-%d')
                             predicted_next = last_date + timedelta(days=180)
+                            # Ensure date is not in the past
+                            while predicted_next < current_date:
+                                predicted_next += timedelta(days=180)
                             final_next_six = predicted_next.strftime('%Y-%m-%d')
                         except:
-                            final_next_six = ''
+                            final_next_six = current_date.strftime('%Y-%m-%d')
                     else:
-                        # No history, predict from today
+                        # No history, start from today
                         final_next_six = current_date.strftime('%Y-%m-%d')
                 else:
                     final_next_six = ''
@@ -13725,17 +13761,29 @@ class AITCMMSSystem:
                 # Annual PM - only if enabled
                 if annual:
                     if next_annual:
-                        final_next_annual = next_annual
+                        # Check if database date is in the future
+                        try:
+                            next_date = datetime.strptime(next_annual, '%Y-%m-%d')
+                            if next_date >= current_date:
+                                final_next_annual = next_annual
+                            else:
+                                # Database date is in the past, calculate from today
+                                final_next_annual = current_date.strftime('%Y-%m-%d')
+                        except:
+                            final_next_annual = current_date.strftime('%Y-%m-%d')
                     elif final_last_annual:
-                        # Predict from last completion + 365 days
+                        # Calculate next occurrence from last completion
                         try:
                             last_date = datetime.strptime(final_last_annual, '%Y-%m-%d')
                             predicted_next = last_date + timedelta(days=365)
+                            # Ensure date is not in the past
+                            while predicted_next < current_date:
+                                predicted_next += timedelta(days=365)
                             final_next_annual = predicted_next.strftime('%Y-%m-%d')
                         except:
-                            final_next_annual = ''
+                            final_next_annual = current_date.strftime('%Y-%m-%d')
                     else:
-                        # No history, predict from today
+                        # No history, start from today
                         final_next_annual = current_date.strftime('%Y-%m-%d')
                 else:
                     final_next_annual = ''
