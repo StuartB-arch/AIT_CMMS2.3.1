@@ -11018,9 +11018,11 @@ class AITCMMSSystem:
                   command=self.delete_equipment_dialog).pack(side='left', padx=5)
         ttk.Button(controls_frame, text="Refresh List",
                   command=self.refresh_equipment_list).pack(side='left', padx=5)
-        ttk.Button(controls_frame, text="Export Equipment", 
+        ttk.Button(controls_frame, text="Export Equipment",
                   command=self.export_equipment_list).pack(side='left', padx=5)
-        ttk.Button(controls_frame, text="Bulk Edit PM Cycles", 
+        ttk.Button(controls_frame, text="PM Frequency Report",
+                  command=self.export_pm_frequency_report).pack(side='left', padx=5)
+        ttk.Button(controls_frame, text="Bulk Edit PM Cycles",
                   command=self.bulk_edit_pm_cycles).pack(side='left', padx=5)
         
         
@@ -13557,6 +13559,256 @@ class AITCMMSSystem:
         except Exception as e:
             raise Exception(f"Failed to generate PDF: {str(e)}")
 
+    def export_pm_frequency_report(self):
+        """Export PM Frequency Report showing all assets with their PM schedules to Excel"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            default_filename = f"PM_Frequency_Report_{timestamp}.xlsx"
+
+            # Ask user for save location
+            file_path = filedialog.asksaveasfilename(
+                title="Export PM Frequency Report",
+                defaultextension=".xlsx",
+                initialname=default_filename,
+                filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+            )
+
+            if not file_path:
+                return
+
+            cursor = self.conn.cursor()
+
+            # Query all equipment with their PM frequencies
+            cursor.execute('''
+                SELECT
+                    e.bfm_equipment_no,
+                    e.sap_material_no,
+                    e.description,
+                    e.location,
+                    e.status,
+                    e.weekly_pm,
+                    e.monthly_pm,
+                    e.six_month_pm,
+                    e.annual_pm,
+                    e.last_weekly_pm,
+                    e.last_monthly_pm,
+                    e.last_six_month_pm,
+                    e.last_annual_pm,
+                    e.next_weekly_pm,
+                    e.next_monthly_pm,
+                    e.next_six_month_pm,
+                    e.next_annual_pm
+                FROM equipment e
+                WHERE (e.weekly_pm = TRUE OR e.monthly_pm = TRUE OR
+                       e.six_month_pm = TRUE OR e.annual_pm = TRUE)
+                ORDER BY e.bfm_equipment_no
+            ''')
+
+            equipment_data = cursor.fetchall()
+
+            # Prepare data for main sheet
+            report_data = []
+            for row in equipment_data:
+                bfm_no, sap_no, desc, location, status, weekly, monthly, six_month, annual, \
+                last_weekly, last_monthly, last_six, last_annual, \
+                next_weekly, next_monthly, next_six, next_annual = row
+
+                # Build PM types list
+                pm_types = []
+                if weekly:
+                    pm_types.append('Weekly')
+                if monthly:
+                    pm_types.append('Monthly')
+                if six_month:
+                    pm_types.append('Six Month')
+                if annual:
+                    pm_types.append('Annual')
+
+                pm_count = len(pm_types)
+                pm_types_str = ', '.join(pm_types)
+
+                report_data.append([
+                    bfm_no,
+                    sap_no or '',
+                    desc or '',
+                    location or '',
+                    status or '',
+                    '✓' if weekly else '',
+                    '✓' if monthly else '',
+                    '✓' if six_month else '',
+                    '✓' if annual else '',
+                    pm_count,
+                    pm_types_str,
+                    last_weekly or '',
+                    last_monthly or '',
+                    last_six or '',
+                    last_annual or '',
+                    next_weekly or '',
+                    next_monthly or '',
+                    next_six or '',
+                    next_annual or ''
+                ])
+
+            # Create DataFrame for main sheet
+            columns = [
+                'BFM Equipment No',
+                'SAP Material No',
+                'Description',
+                'Location',
+                'Status',
+                'Weekly PM',
+                'Monthly PM',
+                'Six Month PM',
+                'Annual PM',
+                'Total PM Types',
+                'PM Frequencies',
+                'Last Weekly',
+                'Last Monthly',
+                'Last Six Month',
+                'Last Annual',
+                'Next Weekly',
+                'Next Monthly',
+                'Next Six Month',
+                'Next Annual'
+            ]
+
+            df = pd.DataFrame(report_data, columns=columns)
+
+            # Create summary statistics
+            total_assets_with_pm = len(equipment_data)
+            total_weekly = sum(1 for row in equipment_data if row[5])  # weekly_pm column
+            total_monthly = sum(1 for row in equipment_data if row[6])  # monthly_pm column
+            total_six_month = sum(1 for row in equipment_data if row[7])  # six_month_pm column
+            total_annual = sum(1 for row in equipment_data if row[8])  # annual_pm column
+
+            # Count by PM type combinations
+            pm_counts = {}
+            for row in equipment_data:
+                pm_types = []
+                if row[5]:
+                    pm_types.append('Weekly')
+                if row[6]:
+                    pm_types.append('Monthly')
+                if row[7]:
+                    pm_types.append('Six Month')
+                if row[8]:
+                    pm_types.append('Annual')
+
+                pm_count = len(pm_types)
+                pm_counts[pm_count] = pm_counts.get(pm_count, 0) + 1
+
+            # Summary data
+            summary_data = [
+                ['Metric', 'Count'],
+                ['Total Assets with PM Schedules', total_assets_with_pm],
+                ['Assets with Weekly PM', total_weekly],
+                ['Assets with Monthly PM', total_monthly],
+                ['Assets with Six Month PM', total_six_month],
+                ['Assets with Annual PM', total_annual],
+                ['', ''],
+                ['Assets by PM Type Count', ''],
+                ['Assets with 1 PM Type', pm_counts.get(1, 0)],
+                ['Assets with 2 PM Types', pm_counts.get(2, 0)],
+                ['Assets with 3 PM Types', pm_counts.get(3, 0)],
+                ['Assets with 4 PM Types', pm_counts.get(4, 0)],
+                ['', ''],
+                ['Total PM Workload Estimate', ''],
+                ['Weekly PMs per year (52 weeks)', total_weekly * 52],
+                ['Monthly PMs per year (12 months)', total_monthly * 12],
+                ['Six Month PMs per year (2 periods)', total_six_month * 2],
+                ['Annual PMs per year (1 period)', total_annual],
+                ['Total PM Tasks per Year', (total_weekly * 52) + (total_monthly * 12) + (total_six_month * 2) + total_annual]
+            ]
+
+            summary_df = pd.DataFrame(summary_data)
+
+            # Export to Excel with multiple sheets
+            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                # Write main data sheet
+                df.to_excel(writer, sheet_name='PM Frequency Details', index=False)
+
+                # Write summary sheet
+                summary_df.to_excel(writer, sheet_name='Summary', index=False, header=False)
+
+                # Format the sheets
+                workbook = writer.book
+
+                # Format main data sheet
+                worksheet = writer.sheets['PM Frequency Details']
+
+                # Set column widths
+                worksheet.column_dimensions['A'].width = 18  # BFM Equipment No
+                worksheet.column_dimensions['B'].width = 18  # SAP Material No
+                worksheet.column_dimensions['C'].width = 40  # Description
+                worksheet.column_dimensions['D'].width = 15  # Location
+                worksheet.column_dimensions['E'].width = 12  # Status
+                worksheet.column_dimensions['F'].width = 12  # Weekly PM
+                worksheet.column_dimensions['G'].width = 12  # Monthly PM
+                worksheet.column_dimensions['H'].width = 15  # Six Month PM
+                worksheet.column_dimensions['I'].width = 12  # Annual PM
+                worksheet.column_dimensions['J'].width = 15  # Total PM Types
+                worksheet.column_dimensions['K'].width = 35  # PM Frequencies
+                worksheet.column_dimensions['L'].width = 12  # Last Weekly
+                worksheet.column_dimensions['M'].width = 12  # Last Monthly
+                worksheet.column_dimensions['N'].width = 15  # Last Six Month
+                worksheet.column_dimensions['O'].width = 12  # Last Annual
+                worksheet.column_dimensions['P'].width = 12  # Next Weekly
+                worksheet.column_dimensions['Q'].width = 12  # Next Monthly
+                worksheet.column_dimensions['R'].width = 15  # Next Six Month
+                worksheet.column_dimensions['S'].width = 12  # Next Annual
+
+                # Style headers
+                from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+                header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+                header_font = Font(bold=True, color='FFFFFF', size=11)
+                center_align = Alignment(horizontal='center', vertical='center')
+
+                for cell in worksheet[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = center_align
+
+                # Format summary sheet
+                summary_worksheet = writer.sheets['Summary']
+                summary_worksheet.column_dimensions['A'].width = 40
+                summary_worksheet.column_dimensions['B'].width = 20
+
+                # Style summary headers
+                title_font = Font(bold=True, size=14, color='366092')
+                summary_worksheet['A1'].font = title_font
+
+                section_font = Font(bold=True, size=12, color='366092')
+                for row_idx in [8, 14]:
+                    summary_worksheet.cell(row=row_idx, column=1).font = section_font
+
+                # Add totals row styling
+                total_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+                total_font = Font(bold=True, size=11)
+                for col_idx in [1, 2]:
+                    cell = summary_worksheet.cell(row=2, column=col_idx)
+                    cell.fill = total_fill
+                    cell.font = total_font
+
+                # Style the grand total row
+                grand_total_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
+                grand_total_font = Font(bold=True, size=12, color='000000')
+                for col_idx in [1, 2]:
+                    cell = summary_worksheet.cell(row=19, column=col_idx)
+                    cell.fill = grand_total_fill
+                    cell.font = grand_total_font
+
+            messagebox.showinfo(
+                "Success",
+                f"PM Frequency Report exported successfully!\n\n"
+                f"File: {file_path}\n\n"
+                f"Total Assets with PM: {total_assets_with_pm}\n"
+                f"Total Annual PM Tasks: {(total_weekly * 52) + (total_monthly * 12) + (total_six_month * 2) + total_annual}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export PM frequency report: {str(e)}")
+            traceback.print_exc()
 
     def process_sharepoint_excel_file(self, file_path):
         """Process the SharePoint Excel file and import CMDATA"""
@@ -13916,13 +14168,15 @@ class AITCMMSSystem:
         controls_frame = ttk.LabelFrame(self.analytics_frame, text="Analytics Controls", padding=10)
         controls_frame.pack(fill='x', padx=10, pady=5)
         
-        ttk.Button(controls_frame, text="Refresh Dashboard", 
+        ttk.Button(controls_frame, text="Refresh Dashboard",
                   command=self.refresh_analytics_dashboard).pack(side='left', padx=5)
-        ttk.Button(controls_frame, text="Equipment Analytics", 
+        ttk.Button(controls_frame, text="Equipment Analytics",
                   command=self.show_equipment_analytics).pack(side='left', padx=5)
-        ttk.Button(controls_frame, text="PM Trends", 
+        ttk.Button(controls_frame, text="PM Trends",
                   command=self.show_pm_trends).pack(side='left', padx=5)
-        ttk.Button(controls_frame, text="Export Analytics", 
+        ttk.Button(controls_frame, text="PM Frequency Report",
+                  command=self.export_pm_frequency_report).pack(side='left', padx=5)
+        ttk.Button(controls_frame, text="Export Analytics",
                   command=self.export_analytics).pack(side='left', padx=5)
         
         # Dashboard display
