@@ -13637,6 +13637,8 @@ class AITCMMSSystem:
 
             # Prepare data for main sheet
             report_data = []
+            current_date = datetime.now()
+
             for row in equipment_data:
                 bfm_no, sap_no, desc, location, status, weekly, monthly, six_month, annual, \
                 last_weekly, last_monthly, last_six, last_annual, \
@@ -13663,18 +13665,80 @@ class AITCMMSSystem:
                 final_last_six = last_six or actual_last_six_month or ''
                 final_last_annual = last_annual or actual_last_annual or ''
 
-                # Check for missing PM history
-                missing_pms = []
-                if weekly and not final_last_weekly:
-                    missing_pms.append('Weekly')
-                if monthly and not final_last_monthly:
-                    missing_pms.append('Monthly')
-                if six_month and not final_last_six:
-                    missing_pms.append('Six Month')
-                if annual and not final_last_annual:
-                    missing_pms.append('Annual')
+                # Calculate/predict Next PM dates only for enabled frequencies
+                # Only show Next PM dates for frequencies that are actually enabled
 
-                notes = f"Never completed: {', '.join(missing_pms)}" if missing_pms else ''
+                # Weekly PM - only if enabled
+                if weekly:
+                    if next_weekly:
+                        final_next_weekly = next_weekly
+                    elif final_last_weekly:
+                        # Predict from last completion + 7 days
+                        try:
+                            last_date = datetime.strptime(final_last_weekly, '%Y-%m-%d')
+                            predicted_next = last_date + timedelta(days=7)
+                            final_next_weekly = predicted_next.strftime('%Y-%m-%d')
+                        except:
+                            final_next_weekly = ''
+                    else:
+                        # No history, predict from today
+                        final_next_weekly = current_date.strftime('%Y-%m-%d')
+                else:
+                    final_next_weekly = ''
+
+                # Monthly PM - only if enabled
+                if monthly:
+                    if next_monthly:
+                        final_next_monthly = next_monthly
+                    elif final_last_monthly:
+                        # Predict from last completion + 30 days
+                        try:
+                            last_date = datetime.strptime(final_last_monthly, '%Y-%m-%d')
+                            predicted_next = last_date + timedelta(days=30)
+                            final_next_monthly = predicted_next.strftime('%Y-%m-%d')
+                        except:
+                            final_next_monthly = ''
+                    else:
+                        # No history, predict from today
+                        final_next_monthly = current_date.strftime('%Y-%m-%d')
+                else:
+                    final_next_monthly = ''
+
+                # Six Month PM - only if enabled
+                if six_month:
+                    if next_six:
+                        final_next_six = next_six
+                    elif final_last_six:
+                        # Predict from last completion + 180 days
+                        try:
+                            last_date = datetime.strptime(final_last_six, '%Y-%m-%d')
+                            predicted_next = last_date + timedelta(days=180)
+                            final_next_six = predicted_next.strftime('%Y-%m-%d')
+                        except:
+                            final_next_six = ''
+                    else:
+                        # No history, predict from today
+                        final_next_six = current_date.strftime('%Y-%m-%d')
+                else:
+                    final_next_six = ''
+
+                # Annual PM - only if enabled
+                if annual:
+                    if next_annual:
+                        final_next_annual = next_annual
+                    elif final_last_annual:
+                        # Predict from last completion + 365 days
+                        try:
+                            last_date = datetime.strptime(final_last_annual, '%Y-%m-%d')
+                            predicted_next = last_date + timedelta(days=365)
+                            final_next_annual = predicted_next.strftime('%Y-%m-%d')
+                        except:
+                            final_next_annual = ''
+                    else:
+                        # No history, predict from today
+                        final_next_annual = current_date.strftime('%Y-%m-%d')
+                else:
+                    final_next_annual = ''
 
                 report_data.append([
                     bfm_no,
@@ -13688,15 +13752,10 @@ class AITCMMSSystem:
                     '✓' if annual else '',
                     pm_count,
                     pm_types_str,
-                    final_last_weekly,
-                    final_last_monthly,
-                    final_last_six,
-                    final_last_annual,
-                    next_weekly or '',
-                    next_monthly or '',
-                    next_six or '',
-                    next_annual or '',
-                    notes
+                    final_next_weekly,
+                    final_next_monthly,
+                    final_next_six,
+                    final_next_annual
                 ])
 
             # Create DataFrame for main sheet
@@ -13712,15 +13771,10 @@ class AITCMMSSystem:
                 'Annual PM',
                 'Total PM Types',
                 'PM Frequencies',
-                'Last Weekly',
-                'Last Monthly',
-                'Last Six Month',
-                'Last Annual',
                 'Next Weekly',
                 'Next Monthly',
                 'Next Six Month',
-                'Next Annual',
-                'Notes'
+                'Next Annual'
             ]
 
             df = pd.DataFrame(report_data, columns=columns)
@@ -13732,9 +13786,8 @@ class AITCMMSSystem:
             total_six_month = sum(1 for row in equipment_data if row[7])  # six_month_pm column
             total_annual = sum(1 for row in equipment_data if row[8])  # annual_pm column
 
-            # Count by PM type combinations and missing completions
+            # Count by PM type combinations
             pm_counts = {}
-            assets_with_missing_history = 0
             for row in equipment_data:
                 pm_types = []
                 if row[5]:
@@ -13749,23 +13802,6 @@ class AITCMMSSystem:
                 pm_count = len(pm_types)
                 pm_counts[pm_count] = pm_counts.get(pm_count, 0) + 1
 
-                # Check for missing completions
-                # row indices: [5]=weekly_pm, [6]=monthly_pm, [7]=six_month_pm, [8]=annual_pm
-                # [9]=last_weekly, [10]=last_monthly, [11]=last_six, [12]=last_annual
-                # [17]=actual_last_weekly, [18]=actual_last_monthly, [19]=actual_last_six, [20]=actual_last_annual
-                has_missing = False
-                if row[5] and not (row[9] or row[17]):  # Weekly enabled but no last date
-                    has_missing = True
-                if row[6] and not (row[10] or row[18]):  # Monthly enabled but no last date
-                    has_missing = True
-                if row[7] and not (row[11] or row[19]):  # Six Month enabled but no last date
-                    has_missing = True
-                if row[8] and not (row[12] or row[20]):  # Annual enabled but no last date
-                    has_missing = True
-
-                if has_missing:
-                    assets_with_missing_history += 1
-
             # Summary data
             summary_data = [
                 ['Metric', 'Count'],
@@ -13774,8 +13810,6 @@ class AITCMMSSystem:
                 ['Assets with Monthly PM', total_monthly],
                 ['Assets with Six Month PM', total_six_month],
                 ['Assets with Annual PM', total_annual],
-                ['', ''],
-                ['⚠ Assets Missing PM History', assets_with_missing_history],
                 ['', ''],
                 ['Assets by PM Type Count', ''],
                 ['Assets with 1 PM Type', pm_counts.get(1, 0)],
@@ -13819,15 +13853,10 @@ class AITCMMSSystem:
                 worksheet.column_dimensions['I'].width = 12  # Annual PM
                 worksheet.column_dimensions['J'].width = 15  # Total PM Types
                 worksheet.column_dimensions['K'].width = 35  # PM Frequencies
-                worksheet.column_dimensions['L'].width = 12  # Last Weekly
-                worksheet.column_dimensions['M'].width = 12  # Last Monthly
-                worksheet.column_dimensions['N'].width = 15  # Last Six Month
-                worksheet.column_dimensions['O'].width = 12  # Last Annual
-                worksheet.column_dimensions['P'].width = 12  # Next Weekly
-                worksheet.column_dimensions['Q'].width = 12  # Next Monthly
-                worksheet.column_dimensions['R'].width = 15  # Next Six Month
-                worksheet.column_dimensions['S'].width = 12  # Next Annual
-                worksheet.column_dimensions['T'].width = 40  # Notes
+                worksheet.column_dimensions['L'].width = 12  # Next Weekly
+                worksheet.column_dimensions['M'].width = 12  # Next Monthly
+                worksheet.column_dimensions['N'].width = 15  # Next Six Month
+                worksheet.column_dimensions['O'].width = 12  # Next Annual
 
                 # Style headers
                 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -13841,16 +13870,6 @@ class AITCMMSSystem:
                     cell.font = header_font
                     cell.alignment = center_align
 
-                # Highlight rows with missing PM completions (yellow background)
-                warning_fill = PatternFill(start_color='FFF3CD', end_color='FFF3CD', fill_type='solid')
-                for row_idx in range(2, len(report_data) + 2):
-                    notes_cell = worksheet.cell(row=row_idx, column=20)  # Column T (Notes)
-                    if notes_cell.value and 'Never completed' in str(notes_cell.value):
-                        # Highlight the entire row
-                        for col_idx in range(1, 21):  # Columns A through T
-                            cell = worksheet.cell(row=row_idx, column=col_idx)
-                            cell.fill = warning_fill
-
                 # Format summary sheet
                 summary_worksheet = writer.sheets['Summary']
                 summary_worksheet.column_dimensions['A'].width = 40
@@ -13861,7 +13880,7 @@ class AITCMMSSystem:
                 summary_worksheet['A1'].font = title_font
 
                 section_font = Font(bold=True, size=12, color='366092')
-                for row_idx in [10, 16]:  # Updated row indices
+                for row_idx in [8, 14]:  # Section headers for "Assets by PM Type Count" and "Total PM Workload Estimate"
                     summary_worksheet.cell(row=row_idx, column=1).font = section_font
 
                 # Add totals row styling
@@ -13872,19 +13891,11 @@ class AITCMMSSystem:
                     cell.fill = total_fill
                     cell.font = total_font
 
-                # Style the warning row (Assets Missing PM History)
-                warning_fill_summary = PatternFill(start_color='FFF3CD', end_color='FFF3CD', fill_type='solid')
-                warning_font = Font(bold=True, size=11, color='856404')
-                for col_idx in [1, 2]:
-                    cell = summary_worksheet.cell(row=8, column=col_idx)
-                    cell.fill = warning_fill_summary
-                    cell.font = warning_font
-
                 # Style the grand total row
                 grand_total_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
                 grand_total_font = Font(bold=True, size=12, color='000000')
                 for col_idx in [1, 2]:
-                    cell = summary_worksheet.cell(row=21, column=col_idx)  # Updated row index
+                    cell = summary_worksheet.cell(row=19, column=col_idx)  # Updated row index for Total PM Tasks per Year
                     cell.fill = grand_total_fill
                     cell.font = grand_total_font
 
