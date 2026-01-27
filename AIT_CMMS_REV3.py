@@ -6573,90 +6573,23 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        ENHANCED: Auto-populate PM type AND PM Due Date from weekly_pm_schedules
-        This prevents errors where wrong PM type is selected (e.g., Monthly logged as Annual)
+        NOTE: Auto-fill has been disabled per user request.
+        User will manually fill in all fields (PM type, technician, due date).
+        Only template-based labor hours are auto-populated when both BFM and PM type are set.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        if bfm_no:
-            # CRITICAL FIX: Auto-populate PM type from schedule if not already selected
-            # This prevents Monthly PMs from being logged as Annual PMs
-            if not pm_type:
-                try:
-                    cursor = self.conn.cursor()
-                    # Calculate current week's start date (Monday)
-                    today = datetime.now().date()
-                    current_week_start = today - timedelta(days=today.weekday())
-
-                    # Find scheduled PM for CURRENT WEEK for this equipment
-                    # BUG FIX: Filter by current week_start_date to avoid returning
-                    # old stale PMs from previous weeks that were never completed
-                    cursor.execute('''
-                        SELECT pm_type, scheduled_date, assigned_technician
-                        FROM weekly_pm_schedules
-                        WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                          AND week_start_date = %s
-                        ORDER BY scheduled_date ASC
-                        LIMIT 1
-                    ''', (bfm_no, current_week_start))
-
-                    schedule_result = cursor.fetchone()
-                    if schedule_result:
-                        scheduled_pm_type = schedule_result[0]
-                        scheduled_date = schedule_result[1]
-                        assigned_tech = schedule_result[2]
-
-                        # Auto-fill PM type from schedule
-                        self.pm_type_var.set(scheduled_pm_type)
-                        self.pm_due_date_var.set(scheduled_date)
-
-                        # Also pre-fill technician if available
-                        if assigned_tech:
-                            self.completion_tech_var.set(assigned_tech)
-
-                        self.update_status(f"Auto-filled from schedule: {scheduled_pm_type} PM due {scheduled_date}")
-                        pm_type = scheduled_pm_type
-                except Exception as e:
-                    print(f"Warning: Could not retrieve scheduled PM: {e}")
-
+        # Only auto-populate labor hours from template when both BFM and PM type are set
         if bfm_no and pm_type:
-            # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
-            try:
-                cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
-
-                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
-                cursor.execute('''
-                    SELECT scheduled_date, week_start_date
-                    FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
-                    LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
-
-                schedule_result = cursor.fetchone()
-                if schedule_result and schedule_result[0]:
-                    scheduled_date = schedule_result[0]
-                    # Auto-populate PM Due Date field with the scheduled date
-                    self.pm_due_date_var.set(scheduled_date)
-                    self.update_status(f"PM Due Date auto-populated with scheduled date: {scheduled_date}")
-            except Exception as e:
-                print(f"Warning: Could not retrieve scheduled date: {e}")
-
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
-                # Update estimated hours
+                # Update estimated hours from template
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
                 self.labor_minutes_var.set(str(int((template['estimated_hours'] % 1) * 60)))
-
-                # Show template info
-                self.update_status(f"Custom template found for {bfm_no} - {pm_type} PM")
+                self.update_status(f"Template found for {bfm_no} - {pm_type} PM")
             else:
-                self.update_status(f"No custom template found for {bfm_no} - {pm_type} PM, using default")
+                self.update_status(f"Enter PM details for {bfm_no}")
 
     def create_equipment_pm_lookup_with_templates(self):
         """Enhanced equipment lookup that shows custom templates"""
@@ -9458,90 +9391,23 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        ENHANCED: Auto-populate PM type AND PM Due Date from weekly_pm_schedules
-        This prevents errors where wrong PM type is selected (e.g., Monthly logged as Annual)
+        NOTE: Auto-fill has been disabled per user request.
+        User will manually fill in all fields (PM type, technician, due date).
+        Only template-based labor hours are auto-populated when both BFM and PM type are set.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        if bfm_no:
-            # CRITICAL FIX: Auto-populate PM type from schedule if not already selected
-            # This prevents Monthly PMs from being logged as Annual PMs
-            if not pm_type:
-                try:
-                    cursor = self.conn.cursor()
-                    # Calculate current week's start date (Monday)
-                    today = datetime.now().date()
-                    current_week_start = today - timedelta(days=today.weekday())
-
-                    # Find scheduled PM for CURRENT WEEK for this equipment
-                    # BUG FIX: Filter by current week_start_date to avoid returning
-                    # old stale PMs from previous weeks that were never completed
-                    cursor.execute('''
-                        SELECT pm_type, scheduled_date, assigned_technician
-                        FROM weekly_pm_schedules
-                        WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                          AND week_start_date = %s
-                        ORDER BY scheduled_date ASC
-                        LIMIT 1
-                    ''', (bfm_no, current_week_start))
-
-                    schedule_result = cursor.fetchone()
-                    if schedule_result:
-                        scheduled_pm_type = schedule_result[0]
-                        scheduled_date = schedule_result[1]
-                        assigned_tech = schedule_result[2]
-
-                        # Auto-fill PM type from schedule
-                        self.pm_type_var.set(scheduled_pm_type)
-                        self.pm_due_date_var.set(scheduled_date)
-
-                        # Also pre-fill technician if available
-                        if assigned_tech:
-                            self.completion_tech_var.set(assigned_tech)
-
-                        self.update_status(f"Auto-filled from schedule: {scheduled_pm_type} PM due {scheduled_date}")
-                        pm_type = scheduled_pm_type
-                except Exception as e:
-                    print(f"Warning: Could not retrieve scheduled PM: {e}")
-
+        # Only auto-populate labor hours from template when both BFM and PM type are set
         if bfm_no and pm_type:
-            # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
-            try:
-                cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
-
-                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
-                cursor.execute('''
-                    SELECT scheduled_date, week_start_date
-                    FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
-                    LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
-
-                schedule_result = cursor.fetchone()
-                if schedule_result and schedule_result[0]:
-                    scheduled_date = schedule_result[0]
-                    # Auto-populate PM Due Date field with the scheduled date
-                    self.pm_due_date_var.set(scheduled_date)
-                    self.update_status(f"PM Due Date auto-populated with scheduled date: {scheduled_date}")
-            except Exception as e:
-                print(f"Warning: Could not retrieve scheduled date: {e}")
-
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
-                # Update estimated hours
+                # Update estimated hours from template
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
                 self.labor_minutes_var.set(str(int((template['estimated_hours'] % 1) * 60)))
-
-                # Show template info
-                self.update_status(f"Custom template found for {bfm_no} - {pm_type} PM")
+                self.update_status(f"Template found for {bfm_no} - {pm_type} PM")
             else:
-                self.update_status(f"No custom template found for {bfm_no} - {pm_type} PM, using default")
+                self.update_status(f"Enter PM details for {bfm_no}")
 
     def create_equipment_pm_lookup_with_templates(self):
         """Enhanced equipment lookup that shows custom templates"""
@@ -14501,56 +14367,6 @@ class AITCMMSSystem:
                     self.update_status("PM submission cancelled - potential duplicate detected")
                     return
 
-            # CRITICAL FIX: Validate PM type matches the weekly schedule
-            # This prevents Monthly PMs from being logged as Annual PMs
-            try:
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
-
-                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
-                cursor.execute('''
-                    SELECT pm_type, assigned_technician, scheduled_date
-                    FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
-                    LIMIT 1
-                ''', (bfm_no, current_week_start))
-
-                scheduled_pm = cursor.fetchone()
-                if scheduled_pm:
-                    scheduled_pm_type = scheduled_pm[0]
-                    scheduled_tech = scheduled_pm[1]
-                    scheduled_date = scheduled_pm[2]
-
-                    # Warn if PM type doesn't match schedule
-                    if pm_type != scheduled_pm_type:
-                        response = messagebox.askyesno(
-                            "WARNING: PM Type Mismatch Detected",
-                            f"The PM type you selected does NOT match the schedule!\n\n"
-                            f"You selected: {pm_type}\n"
-                            f"Schedule shows: {scheduled_pm_type}\n\n"
-                            f"Equipment: {bfm_no}\n"
-                            f"Scheduled for: {scheduled_date}\n"
-                            f"Assigned to: {scheduled_tech}\n\n"
-                            f"This is the issue that caused Monthly PMs to be logged as Annual!\n\n"
-                            f"Do you want to proceed with '{pm_type}' anyway?\n"
-                            f"Click 'No' to go back and select '{scheduled_pm_type}' instead.",
-                            icon='warning'
-                        )
-                        if not response:
-                            try:
-                                self.conn.rollback()
-                            except:
-                                pass
-                            self.update_status(f"PM submission cancelled - please select '{scheduled_pm_type}' PM type")
-                            # Auto-correct the PM type for the user
-                            self.pm_type_var.set(scheduled_pm_type)
-                            return
-            except Exception as e:
-                print(f"Warning: Could not validate PM type against schedule: {e}")
-
             # Auto-calculate next annual PM date if blank
             if not next_annual_pm and pm_type in ['Monthly', 'Six Month', 'Annual']:
                 try:
@@ -14947,23 +14763,27 @@ class AITCMMSSystem:
                 raise Exception(f"Equipment update failed - affected {affected_rows} rows instead of 1")
 
             # Update weekly schedule status if exists
-            # Find and update any scheduled PM for this equipment/PM type/technician combination
-            # regardless of which week it was scheduled for (PMs can be completed in different weeks)
+            # Match by equipment and PM type only (any technician can complete any PM)
+            # Calculate current week's start date (Monday)
+            today = datetime.now().date()
+            current_week_start = today - timedelta(days=today.weekday())
+
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
                 status = 'Completed',
                 completion_date = %s,
                 labor_hours = %s,
-                notes = %s
+                notes = %s,
+                assigned_technician = %s
                 WHERE id = (
                     SELECT id FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s AND assigned_technician = %s
-                    AND status = 'Scheduled'
+                    WHERE bfm_equipment_no = %s AND pm_type = %s
+                    AND status = 'Scheduled' AND week_start_date = %s
                     ORDER BY scheduled_date
                     LIMIT 1
                 )
-            ''', (completion_date, labor_hours + (labor_minutes/60), notes,
-                bfm_no, pm_type, technician))
+            ''', (completion_date, labor_hours + (labor_minutes/60), notes, technician,
+                bfm_no, pm_type, current_week_start))
 
             # DEBUG: Check if the update worked
             updated_rows = cursor.rowcount
@@ -15163,19 +14983,25 @@ class AITCMMSSystem:
                 raise Exception(f"Equipment status update failed - affected {affected_rows} rows")
 
             # Update weekly schedule status to "Cannot Find"
+            # Match by equipment only (any technician can report any equipment as cannot find)
+            # Calculate current week's start date (Monday)
+            today = datetime.now().date()
+            current_week_start = today - timedelta(days=today.weekday())
+
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
                 status = 'Cannot Find',
                 completion_date = %s,
-                notes = %s
+                notes = %s,
+                assigned_technician = %s
                 WHERE id = (
                     SELECT id FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND assigned_technician = %s
-                    AND status = 'Scheduled'
+                    WHERE bfm_equipment_no = %s
+                    AND status = 'Scheduled' AND week_start_date = %s
                     ORDER BY scheduled_date
                     LIMIT 1
                 )
-            ''', (completion_date, notes, bfm_no, technician))
+            ''', (completion_date, notes, technician, bfm_no, current_week_start))
 
             print(f"CHECK: Cannot Find PM processed: {bfm_no}")
             return True
