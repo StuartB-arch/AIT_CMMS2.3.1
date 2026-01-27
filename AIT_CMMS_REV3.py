@@ -6583,25 +6583,26 @@ class AITCMMSSystem:
         # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
         if bfm_no and pm_type:
             # Auto-fill PM Due Date from schedule
+            # Look for ANY scheduled PM for this equipment/PM type (not just current week)
+            # This allows completing PMs that were scheduled in previous weeks
             try:
                 cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
 
                 cursor.execute('''
                     SELECT scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
                     ORDER BY scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type))
 
                 schedule_result = cursor.fetchone()
                 if schedule_result and schedule_result[0]:
                     scheduled_date = schedule_result[0]
-                    self.pm_due_date_var.set(scheduled_date)
+                    # Handle both string and date object formats
+                    if hasattr(scheduled_date, 'strftime'):
+                        scheduled_date = scheduled_date.strftime('%Y-%m-%d')
+                    self.pm_due_date_var.set(str(scheduled_date))
                     self.update_status(f"PM Due Date: {scheduled_date}")
             except Exception as e:
                 print(f"Warning: Could not retrieve scheduled date: {e}")
@@ -9422,25 +9423,26 @@ class AITCMMSSystem:
         # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
         if bfm_no and pm_type:
             # Auto-fill PM Due Date from schedule
+            # Look for ANY scheduled PM for this equipment/PM type (not just current week)
+            # This allows completing PMs that were scheduled in previous weeks
             try:
                 cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
 
                 cursor.execute('''
                     SELECT scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
                     ORDER BY scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type))
 
                 schedule_result = cursor.fetchone()
                 if schedule_result and schedule_result[0]:
                     scheduled_date = schedule_result[0]
-                    self.pm_due_date_var.set(scheduled_date)
+                    # Handle both string and date object formats
+                    if hasattr(scheduled_date, 'strftime'):
+                        scheduled_date = scheduled_date.strftime('%Y-%m-%d')
+                    self.pm_due_date_var.set(str(scheduled_date))
                     self.update_status(f"PM Due Date: {scheduled_date}")
             except Exception as e:
                 print(f"Warning: Could not retrieve scheduled date: {e}")
@@ -11085,21 +11087,30 @@ class AITCMMSSystem:
                 ORDER BY week_start_date DESC
                 LIMIT 52
             ''')
-            available_weeks = [row[0] for row in cursor.fetchall()]
-        
+            # Convert date objects to strings for display
+            available_weeks = []
+            for row in cursor.fetchall():
+                week_date = row[0]
+                if hasattr(week_date, 'strftime'):
+                    available_weeks.append(week_date.strftime('%Y-%m-%d'))
+                else:
+                    available_weeks.append(str(week_date))
+
             # Always include current week as an option
             current_week = self.current_week_start.strftime('%Y-%m-%d')
             if current_week not in available_weeks:
                 available_weeks.append(current_week)
                 available_weeks.sort(reverse=True)
-            
+
             # Update combobox values
             self.week_combo['values'] = available_weeks
-        
+
             # Set to most recent week with data, or current week if no data
             if available_weeks:
                 self.week_start_var.set(available_weeks[0])
-            
+
+            print(f"DEBUG: Week selector populated with {len(available_weeks)} weeks: {available_weeks[:5]}...")
+
         except Exception as e:
             print(f"Error populating week selector: {e}")
 
