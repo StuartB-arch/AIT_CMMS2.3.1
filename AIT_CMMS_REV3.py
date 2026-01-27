@@ -6585,16 +6585,21 @@ class AITCMMSSystem:
             if not pm_type:
                 try:
                     cursor = self.conn.cursor()
-                    # Find the OLDEST scheduled PM for this equipment (the one actually due)
-                    # BUG FIX: Was using DESC which returned most recently scheduled PM
-                    # causing wrong technician/PM type to populate. Changed to ASC.
+                    # Calculate current week's start date (Monday)
+                    today = datetime.now().date()
+                    current_week_start = today - timedelta(days=today.weekday())
+
+                    # Find scheduled PM for CURRENT WEEK for this equipment
+                    # BUG FIX: Filter by current week_start_date to avoid returning
+                    # old stale PMs from previous weeks that were never completed
                     cursor.execute('''
                         SELECT pm_type, scheduled_date, assigned_technician
                         FROM weekly_pm_schedules
                         WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                        ORDER BY scheduled_date ASC, week_start_date ASC
+                          AND week_start_date = %s
+                        ORDER BY scheduled_date ASC
                         LIMIT 1
-                    ''', (bfm_no,))
+                    ''', (bfm_no, current_week_start))
 
                     schedule_result = cursor.fetchone()
                     if schedule_result:
@@ -6619,13 +6624,19 @@ class AITCMMSSystem:
             # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
             try:
                 cursor = self.conn.cursor()
+                # Calculate current week's start date (Monday)
+                today = datetime.now().date()
+                current_week_start = today - timedelta(days=today.weekday())
+
+                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
                 cursor.execute('''
                     SELECT scheduled_date, week_start_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                    ORDER BY scheduled_date ASC, week_start_date ASC
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type))
+                ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
                 if schedule_result and schedule_result[0]:
@@ -9459,16 +9470,21 @@ class AITCMMSSystem:
             if not pm_type:
                 try:
                     cursor = self.conn.cursor()
-                    # Find the OLDEST scheduled PM for this equipment (the one actually due)
-                    # BUG FIX: Was using DESC which returned most recently scheduled PM
-                    # causing wrong technician/PM type to populate. Changed to ASC.
+                    # Calculate current week's start date (Monday)
+                    today = datetime.now().date()
+                    current_week_start = today - timedelta(days=today.weekday())
+
+                    # Find scheduled PM for CURRENT WEEK for this equipment
+                    # BUG FIX: Filter by current week_start_date to avoid returning
+                    # old stale PMs from previous weeks that were never completed
                     cursor.execute('''
                         SELECT pm_type, scheduled_date, assigned_technician
                         FROM weekly_pm_schedules
                         WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                        ORDER BY scheduled_date ASC, week_start_date ASC
+                          AND week_start_date = %s
+                        ORDER BY scheduled_date ASC
                         LIMIT 1
-                    ''', (bfm_no,))
+                    ''', (bfm_no, current_week_start))
 
                     schedule_result = cursor.fetchone()
                     if schedule_result:
@@ -9493,13 +9509,19 @@ class AITCMMSSystem:
             # Auto-populate PM Due Date with scheduled_date from weekly_pm_schedules
             try:
                 cursor = self.conn.cursor()
+                # Calculate current week's start date (Monday)
+                today = datetime.now().date()
+                current_week_start = today - timedelta(days=today.weekday())
+
+                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
                 cursor.execute('''
                     SELECT scheduled_date, week_start_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                    ORDER BY scheduled_date ASC, week_start_date ASC
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type))
+                ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
                 if schedule_result and schedule_result[0]:
@@ -14482,13 +14504,19 @@ class AITCMMSSystem:
             # CRITICAL FIX: Validate PM type matches the weekly schedule
             # This prevents Monthly PMs from being logged as Annual PMs
             try:
+                # Calculate current week's start date (Monday)
+                today = datetime.now().date()
+                current_week_start = today - timedelta(days=today.weekday())
+
+                # BUG FIX: Filter by current week_start_date to avoid old stale PMs
                 cursor.execute('''
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                    ORDER BY scheduled_date ASC, week_start_date ASC
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no,))
+                ''', (bfm_no, current_week_start))
 
                 scheduled_pm = cursor.fetchone()
                 if scheduled_pm:
