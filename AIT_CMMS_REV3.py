@@ -6585,12 +6585,14 @@ class AITCMMSSystem:
             if not pm_type:
                 try:
                     cursor = self.conn.cursor()
-                    # Find the most recent scheduled PM for this equipment
+                    # Find the OLDEST scheduled PM for this equipment (the one actually due)
+                    # BUG FIX: Was using DESC which returned most recently scheduled PM
+                    # causing wrong technician/PM type to populate. Changed to ASC.
                     cursor.execute('''
                         SELECT pm_type, scheduled_date, assigned_technician
                         FROM weekly_pm_schedules
                         WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                        ORDER BY week_start_date DESC, scheduled_date DESC
+                        ORDER BY scheduled_date ASC, week_start_date ASC
                         LIMIT 1
                     ''', (bfm_no,))
 
@@ -6620,8 +6622,8 @@ class AITCMMSSystem:
                 cursor.execute('''
                     SELECT scheduled_date, week_start_date
                     FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s
-                    ORDER BY week_start_date DESC
+                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
+                    ORDER BY scheduled_date ASC, week_start_date ASC
                     LIMIT 1
                 ''', (bfm_no, pm_type))
 
@@ -9457,12 +9459,14 @@ class AITCMMSSystem:
             if not pm_type:
                 try:
                     cursor = self.conn.cursor()
-                    # Find the most recent scheduled PM for this equipment
+                    # Find the OLDEST scheduled PM for this equipment (the one actually due)
+                    # BUG FIX: Was using DESC which returned most recently scheduled PM
+                    # causing wrong technician/PM type to populate. Changed to ASC.
                     cursor.execute('''
                         SELECT pm_type, scheduled_date, assigned_technician
                         FROM weekly_pm_schedules
                         WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                        ORDER BY week_start_date DESC, scheduled_date DESC
+                        ORDER BY scheduled_date ASC, week_start_date ASC
                         LIMIT 1
                     ''', (bfm_no,))
 
@@ -9492,8 +9496,8 @@ class AITCMMSSystem:
                 cursor.execute('''
                     SELECT scheduled_date, week_start_date
                     FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s
-                    ORDER BY week_start_date DESC
+                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
+                    ORDER BY scheduled_date ASC, week_start_date ASC
                     LIMIT 1
                 ''', (bfm_no, pm_type))
 
@@ -14482,7 +14486,7 @@ class AITCMMSSystem:
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                    ORDER BY week_start_date DESC, scheduled_date DESC
+                    ORDER BY scheduled_date ASC, week_start_date ASC
                     LIMIT 1
                 ''', (bfm_no,))
 
