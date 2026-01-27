@@ -6573,23 +6573,44 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        NOTE: Auto-fill has been disabled per user request.
-        User will manually fill in all fields (PM type, technician, due date).
-        Only template-based labor hours are auto-populated when both BFM and PM type are set.
+        NOTE: PM type and technician are manually filled by user.
+        PM Due Date is auto-filled from the schedule when BFM and PM type are set.
+        Labor hours are auto-populated from templates.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        # Only auto-populate labor hours from template when both BFM and PM type are set
+        # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
         if bfm_no and pm_type:
+            # Auto-fill PM Due Date from schedule
+            try:
+                cursor = self.conn.cursor()
+                # Calculate current week's start date (Monday)
+                today = datetime.now().date()
+                current_week_start = today - timedelta(days=today.weekday())
+
+                cursor.execute('''
+                    SELECT scheduled_date
+                    FROM weekly_pm_schedules
+                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
+                    LIMIT 1
+                ''', (bfm_no, pm_type, current_week_start))
+
+                schedule_result = cursor.fetchone()
+                if schedule_result and schedule_result[0]:
+                    scheduled_date = schedule_result[0]
+                    self.pm_due_date_var.set(scheduled_date)
+                    self.update_status(f"PM Due Date: {scheduled_date}")
+            except Exception as e:
+                print(f"Warning: Could not retrieve scheduled date: {e}")
+
+            # Auto-populate labor hours from template
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
-                # Update estimated hours from template
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
                 self.labor_minutes_var.set(str(int((template['estimated_hours'] % 1) * 60)))
-                self.update_status(f"Template found for {bfm_no} - {pm_type} PM")
-            else:
-                self.update_status(f"Enter PM details for {bfm_no}")
 
     def create_equipment_pm_lookup_with_templates(self):
         """Enhanced equipment lookup that shows custom templates"""
@@ -9391,23 +9412,44 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected
 
-        NOTE: Auto-fill has been disabled per user request.
-        User will manually fill in all fields (PM type, technician, due date).
-        Only template-based labor hours are auto-populated when both BFM and PM type are set.
+        NOTE: PM type and technician are manually filled by user.
+        PM Due Date is auto-filled from the schedule when BFM and PM type are set.
+        Labor hours are auto-populated from templates.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        # Only auto-populate labor hours from template when both BFM and PM type are set
+        # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
         if bfm_no and pm_type:
+            # Auto-fill PM Due Date from schedule
+            try:
+                cursor = self.conn.cursor()
+                # Calculate current week's start date (Monday)
+                today = datetime.now().date()
+                current_week_start = today - timedelta(days=today.weekday())
+
+                cursor.execute('''
+                    SELECT scheduled_date
+                    FROM weekly_pm_schedules
+                    WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
+                    LIMIT 1
+                ''', (bfm_no, pm_type, current_week_start))
+
+                schedule_result = cursor.fetchone()
+                if schedule_result and schedule_result[0]:
+                    scheduled_date = schedule_result[0]
+                    self.pm_due_date_var.set(scheduled_date)
+                    self.update_status(f"PM Due Date: {scheduled_date}")
+            except Exception as e:
+                print(f"Warning: Could not retrieve scheduled date: {e}")
+
+            # Auto-populate labor hours from template
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
-                # Update estimated hours from template
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
                 self.labor_minutes_var.set(str(int((template['estimated_hours'] % 1) * 60)))
-                self.update_status(f"Template found for {bfm_no} - {pm_type} PM")
-            else:
-                self.update_status(f"Enter PM details for {bfm_no}")
 
     def create_equipment_pm_lookup_with_templates(self):
         """Enhanced equipment lookup that shows custom templates"""
