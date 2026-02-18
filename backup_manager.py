@@ -9,6 +9,7 @@ Handles automated database backups including:
 """
 
 import os
+import glob
 import shutil
 import threading
 import time
@@ -18,6 +19,49 @@ from typing import List, Dict, Optional, Tuple
 import json
 from pathlib import Path
 import hashlib
+
+
+def _find_pg_binary(binary_name: str) -> str:
+    """
+    Locate a PostgreSQL binary (pg_dump, pg_restore) on the system.
+
+    Checks the system PATH first, then falls back to common PostgreSQL
+    installation directories on Windows.
+
+    Args:
+        binary_name: Name of the binary without extension (e.g. 'pg_dump')
+
+    Returns:
+        Full path to the binary, or just the name if it is already on PATH
+
+    Raises:
+        FileNotFoundError: If the binary cannot be found anywhere
+    """
+    # Check PATH first (works on all platforms when PostgreSQL bin is in PATH)
+    if shutil.which(binary_name):
+        return binary_name
+
+    # On Windows, PostgreSQL is often installed without updating the system PATH.
+    # Search common installation locations for every installed version.
+    if os.name == 'nt':
+        pg_base_dirs = [
+            r"C:\Program Files\PostgreSQL",
+            r"C:\Program Files (x86)\PostgreSQL",
+        ]
+        for pg_base in pg_base_dirs:
+            pattern = os.path.join(pg_base, '*', 'bin', f'{binary_name}.exe')
+            matches = sorted(glob.glob(pattern), reverse=True)  # newest version first
+            if matches:
+                return matches[0]
+
+    raise FileNotFoundError(
+        f"'{binary_name}' could not be found.\n\n"
+        f"Please ensure PostgreSQL is installed and its 'bin' directory is in\n"
+        f"your system PATH, or add the path manually.\n\n"
+        f"Common fix (Windows): Add\n"
+        f"  C:\\Program Files\\PostgreSQL\\<version>\\bin\n"
+        f"to your system PATH environment variable, then restart the application."
+    )
 
 
 def get_safe_backup_directory(preferred_dir: str = None) -> Path:
@@ -218,8 +262,16 @@ class BackupManager:
             env = os.environ.copy()
             env['PGPASSWORD'] = self.db_config['password']
 
+            try:
+                pg_dump_path = _find_pg_binary('pg_dump')
+            except FileNotFoundError as e:
+                error_msg = f"pg_dump not found: {str(e)}"
+                print(error_msg)
+                self._log_backup(filename, 'failed', error_msg)
+                return False, "", error_msg
+
             cmd = [
-                'pg_dump',
+                pg_dump_path,
                 '-h', self.db_config['host'],
                 '-p', str(self.db_config['port']),
                 '-U', self.db_config['user'],
@@ -298,8 +350,13 @@ class BackupManager:
             env = os.environ.copy()
             env['PGPASSWORD'] = self.db_config['password']
 
+            try:
+                pg_restore_path = _find_pg_binary('pg_restore')
+            except FileNotFoundError as e:
+                return False, f"pg_restore not found: {str(e)}"
+
             cmd = [
-                'pg_restore',
+                pg_restore_path,
                 '--list',
                 backup_path
             ]
@@ -348,12 +405,17 @@ class BackupManager:
             env = os.environ.copy()
             env['PGPASSWORD'] = self.db_config['password']
 
+            try:
+                pg_restore_path = _find_pg_binary('pg_restore')
+            except FileNotFoundError as e:
+                return False, f"pg_restore not found: {str(e)}"
+
             # First, terminate all connections to the database
             # (This would require superuser privileges, so we'll skip it for now)
 
             # Restore the backup
             cmd = [
-                'pg_restore',
+                pg_restore_path,
                 '-h', self.db_config['host'],
                 '-p', str(self.db_config['port']),
                 '-U', self.db_config['user'],
