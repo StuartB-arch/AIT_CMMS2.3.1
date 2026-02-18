@@ -320,7 +320,7 @@ class BackupUI:
         backup_file = filedialog.askopenfilename(
             title="Select Backup File to Restore",
             filetypes=[
-                ("Backup Files", "*.backup"),
+                ("CMMS Backup Files", "*.cmmsbackup"),
                 ("All Files", "*.*")
             ],
             initialdir=str(self.backup_manager.backup_dir)
@@ -475,8 +475,8 @@ class BackupUI:
 
         # Ask user where to save
         save_path = filedialog.asksaveasfilename(
-            defaultextension=".backup",
-            filetypes=[("Backup Files", "*.backup"), ("All Files", "*.*")],
+            defaultextension=".cmmsbackup",
+            filetypes=[("CMMS Backup Files", "*.cmmsbackup"), ("All Files", "*.*")],
             initialfile=filename,
             title="Export Backup File"
         )
