@@ -2,71 +2,141 @@
 Backup Manager Module
 Handles automated database backups including:
 - Scheduled backups (daily, weekly, monthly)
-- Backup rotation and retention
+- Backup retention and cleanup
 - Backup verification
 - Restore capabilities
-- Compression and encryption support
+- Compression support
+
+Uses psycopg2 directly to connect to the NEON cloud database.
+No local PostgreSQL installation (pg_dump / pg_restore) is required.
 """
 
 import os
-import glob
+import gzip
 import shutil
 import threading
 import time
-import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from decimal import Decimal
+import uuid
 from typing import List, Dict, Optional, Tuple
 import json
 from pathlib import Path
 import hashlib
 
 
-def _find_pg_binary(binary_name: str) -> str:
+# Backup file extension for the Python-native format
+BACKUP_FILE_EXTENSION = ".cmmsbackup"
+
+
+# ---------------------------------------------------------------------------
+# Value serialisation helpers
+# Psycopg2 returns rich Python types (datetime, Decimal, UUID, …) that are
+# not directly JSON-serialisable.  We tag them so we can round-trip them
+# faithfully on restore.
+# ---------------------------------------------------------------------------
+
+def _serialize_value(v):
+    """Convert a value fetched from psycopg2 into a JSON-serialisable form."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, datetime):
+        return {'_t': 'dt', 'v': v.isoformat()}
+    if isinstance(v, date):
+        return {'_t': 'd', 'v': v.isoformat()}
+    if isinstance(v, Decimal):
+        return {'_t': 'dec', 'v': str(v)}
+    if isinstance(v, uuid.UUID):
+        return {'_t': 'uuid', 'v': str(v)}
+    if isinstance(v, memoryview):
+        return {'_t': 'bytes', 'v': bytes(v).hex()}
+    if isinstance(v, bytes):
+        return {'_t': 'bytes', 'v': v.hex()}
+    # Lists / dicts (e.g. JSONB columns) are already JSON-compatible
+    if isinstance(v, (list, dict)):
+        return v
+    # Fallback – convert to string so we never crash the backup
+    return str(v)
+
+
+def _deserialize_value(v):
+    """Restore a tagged JSON value back to the Python type psycopg2 expects."""
+    if isinstance(v, dict) and '_t' in v:
+        t, val = v['_t'], v['v']
+        if t == 'dt':
+            return datetime.fromisoformat(val)
+        if t == 'd':
+            return date.fromisoformat(val)
+        if t == 'dec':
+            return Decimal(val)
+        if t == 'uuid':
+            return uuid.UUID(val)
+        if t == 'bytes':
+            return bytes.fromhex(val)
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Table-ordering helper (topological sort on FK dependencies)
+# Used to ensure parent tables are inserted before child tables on restore.
+# ---------------------------------------------------------------------------
+
+def _get_table_insert_order(conn, tables: List[str]) -> List[str]:
     """
-    Locate a PostgreSQL binary (pg_dump, pg_restore) on the system.
-
-    Checks the system PATH first, then falls back to common PostgreSQL
-    installation directories on Windows.
-
-    Args:
-        binary_name: Name of the binary without extension (e.g. 'pg_dump')
-
-    Returns:
-        Full path to the binary, or just the name if it is already on PATH
-
-    Raises:
-        FileNotFoundError: If the binary cannot be found anywhere
+    Return *tables* sorted so that FK parent tables come before child tables.
+    Falls back to the original order if the query fails.
     """
-    # Check PATH first (works on all platforms when PostgreSQL bin is in PATH)
-    if shutil.which(binary_name):
-        return binary_name
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT tc.table_name   AS child,
+                   ccu.table_name  AS parent
+            FROM   information_schema.table_constraints  tc
+            JOIN   information_schema.referential_constraints rc
+                   ON tc.constraint_name = rc.constraint_name
+                   AND tc.constraint_schema = rc.constraint_schema
+            JOIN   information_schema.constraint_column_usage ccu
+                   ON rc.unique_constraint_name = ccu.constraint_name
+                   AND rc.unique_constraint_schema = ccu.constraint_schema
+            WHERE  tc.constraint_type = 'FOREIGN KEY'
+            AND    tc.table_schema    = 'public'
+        """)
+        deps = cur.fetchall()
+        cur.close()
+    except Exception:
+        return tables
 
-    # On Windows, PostgreSQL is often installed without updating the system PATH.
-    # Search common installation locations for every installed version.
-    if os.name == 'nt':
-        pg_base_dirs = [
-            r"C:\Program Files\PostgreSQL",
-            r"C:\Program Files (x86)\PostgreSQL",
-        ]
-        for pg_base in pg_base_dirs:
-            pattern = os.path.join(pg_base, '*', 'bin', f'{binary_name}.exe')
-            matches = sorted(glob.glob(pattern), reverse=True)  # newest version first
-            if matches:
-                return matches[0]
+    # Build dependency map
+    depends_on: Dict[str, set] = {t: set() for t in tables}
+    for child, parent in deps:
+        if child in depends_on and parent in depends_on and child != parent:
+            depends_on[child].add(parent)
 
-    raise FileNotFoundError(
-        f"'{binary_name}' could not be found.\n\n"
-        f"Please ensure PostgreSQL is installed and its 'bin' directory is in\n"
-        f"your system PATH, or add the path manually.\n\n"
-        f"Common fix (Windows): Add\n"
-        f"  C:\\Program Files\\PostgreSQL\\<version>\\bin\n"
-        f"to your system PATH environment variable, then restart the application."
-    )
+    # Kahn's topological sort
+    ordered: List[str] = []
+    visited: set = set()
 
+    def _visit(table: str):
+        if table in visited:
+            return
+        visited.add(table)
+        for dep in depends_on.get(table, set()):
+            _visit(dep)
+        ordered.append(table)
+
+    for t in tables:
+        _visit(t)
+
+    return ordered
+
+
+# ---------------------------------------------------------------------------
+# Backup directory helper (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def get_safe_backup_directory(preferred_dir: str = None) -> Path:
     """
-    Determine a safe, writable directory for backups
+    Determine a safe, writable directory for backups.
 
     Args:
         preferred_dir: Preferred backup directory path (optional)
@@ -74,48 +144,30 @@ def get_safe_backup_directory(preferred_dir: str = None) -> Path:
     Returns:
         Path object for a writable backup directory
     """
-    # If a preferred directory is provided and writable, use it
     if preferred_dir:
         try:
             test_path = Path(preferred_dir)
             test_path.mkdir(parents=True, exist_ok=True)
-            # Test write permission
             test_file = test_path / ".write_test"
             test_file.touch()
             test_file.unlink()
             return test_path
         except (PermissionError, OSError):
-            pass  # Fall through to alternatives
+            pass
 
-    # Try user's Documents folder
-    try:
-        if os.name == 'nt':  # Windows
-            documents = Path.home() / "Documents" / "AIT_CMMS_Backups"
-        else:  # Linux/Mac
-            documents = Path.home() / "Documents" / "AIT_CMMS_Backups"
+    for candidate in [
+        Path.home() / "Documents" / "AIT_CMMS_Backups",
+        Path.home() / "AIT_CMMS_Backups",
+    ]:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+            return candidate
+        except (PermissionError, OSError):
+            pass
 
-        documents.mkdir(parents=True, exist_ok=True)
-        # Test write permission
-        test_file = documents / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        return documents
-    except (PermissionError, OSError):
-        pass
-
-    # Try user's home directory
-    try:
-        home_backup = Path.home() / "AIT_CMMS_Backups"
-        home_backup.mkdir(parents=True, exist_ok=True)
-        # Test write permission
-        test_file = home_backup / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        return home_backup
-    except (PermissionError, OSError):
-        pass
-
-    # Try temp directory as last resort
     try:
         import tempfile
         temp_backup = Path(tempfile.gettempdir()) / "AIT_CMMS_Backups"
@@ -124,270 +176,312 @@ def get_safe_backup_directory(preferred_dir: str = None) -> Path:
     except (PermissionError, OSError):
         pass
 
-    # If all else fails, raise an error
     raise PermissionError(
         "Unable to find a writable directory for backups.\n\n"
         "Tried locations:\n"
         f"1. {preferred_dir if preferred_dir else 'Not specified'}\n"
         f"2. {Path.home() / 'Documents' / 'AIT_CMMS_Backups'}\n"
         f"3. {Path.home() / 'AIT_CMMS_Backups'}\n"
-        f"4. {Path(tempfile.gettempdir()) / 'AIT_CMMS_Backups'}\n\n"
+        f"4. (system temp directory)\n\n"
         "Please run the application as Administrator or check folder permissions."
     )
 
 
+# ---------------------------------------------------------------------------
+# BackupManager
+# ---------------------------------------------------------------------------
+
 class BackupManager:
-    """Manages automated database backups"""
+    """Manages automated database backups via a direct psycopg2 connection."""
 
     def __init__(self, db_config: Dict, backup_dir: str = None):
         """
-        Initialize backup manager
+        Initialise the backup manager.
 
         Args:
-            db_config: Database configuration dictionary
-            backup_dir: Directory to store backups (optional, will auto-detect safe location)
+            db_config: Database configuration dictionary (host, port, database,
+                       user, password, sslmode …)
+            backup_dir: Directory to store backups (optional; auto-detected).
         """
         self.db_config = db_config
 
-        # Determine safe backup directory
         self.backup_dir = get_safe_backup_directory(backup_dir)
         self.config_file = self.backup_dir / "backup_config.json"
         self.backup_log_file = self.backup_dir / "backup_log.json"
 
-        # Log the backup directory location
         print(f"Backup directory: {self.backup_dir}")
 
-        # Store info about whether we're using a fallback location
-        self.using_fallback_location = (backup_dir is None) or (str(self.backup_dir) != str(Path(backup_dir).resolve()))
+        self.using_fallback_location = (
+            backup_dir is None or
+            str(self.backup_dir) != str(Path(backup_dir).resolve())
+        )
 
-        # Default configuration
         self.config = {
             'enabled': True,
-            'schedule': 'daily',  # daily, weekly, monthly
-            'backup_time': '02:00',  # Time to run backup (24-hour format)
-            'retention_days': 30,  # Keep backups for 30 days
-            'max_backups': 50,  # Maximum number of backups to keep
-            'compress': True,  # Compress backups
-            'verify_after_backup': True  # Verify backup after creation
+            'schedule': 'daily',
+            'backup_time': '02:00',
+            'retention_days': 30,
+            'max_backups': 50,
+            'compress': True,
+            'verify_after_backup': True,
         }
 
-        # Load existing configuration
         self._load_config()
 
-        # Backup thread
         self.backup_thread = None
         self.stop_event = threading.Event()
         self.last_backup_time = None
 
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    # ------------------------------------------------------------------
+
     def _load_config(self):
-        """Load backup configuration from file"""
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
-                    loaded_config = json.load(f)
-                    self.config.update(loaded_config)
+                    self.config.update(json.load(f))
             except Exception as e:
                 print(f"Error loading backup config: {e}")
 
     def _save_config(self):
-        """Save backup configuration to file"""
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             print(f"Error saving backup config: {e}")
 
-    def _log_backup(self, backup_file: str, status: str, message: str = "", file_size: int = 0):
-        """
-        Log backup operation
-
-        Args:
-            backup_file: Backup filename
-            status: Status (success, failed, verified)
-            message: Optional message
-            file_size: File size in bytes
-        """
+    def _log_backup(self, backup_file: str, status: str,
+                    message: str = "", file_size: int = 0):
         log_entry = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'backup_file': backup_file,
             'status': status,
             'message': message,
-            'file_size': file_size
+            'file_size': file_size,
         }
-
-        # Load existing log
         log = []
         if self.backup_log_file.exists():
             try:
                 with open(self.backup_log_file, 'r') as f:
                     log = json.load(f)
-            except:
+            except Exception:
                 pass
-
-        # Add new entry
         log.append(log_entry)
-
-        # Keep only last 1000 entries
         log = log[-1000:]
-
-        # Save log
         try:
             with open(self.backup_log_file, 'w') as f:
                 json.dump(log, f, indent=2)
         except Exception as e:
             print(f"Error saving backup log: {e}")
 
-    def create_backup(self, backup_name: Optional[str] = None) -> Tuple[bool, str, str]:
-        """
-        Create a database backup
+    # ------------------------------------------------------------------
+    # psycopg2 connection helper
+    # ------------------------------------------------------------------
 
-        Args:
-            backup_name: Optional custom backup name
+    def _connect(self):
+        """Open a fresh psycopg2 connection to the NEON database."""
+        import psycopg2
+        # Build connection kwargs; only pass keys psycopg2 understands
+        conn_kwargs = {k: v for k, v in self.db_config.items()
+                       if k in ('host', 'port', 'database', 'user',
+                                'password', 'sslmode')}
+        return psycopg2.connect(**conn_kwargs)
+
+    # ------------------------------------------------------------------
+    # Backup
+    # ------------------------------------------------------------------
+
+    def create_backup(self, backup_name: Optional[str] = None
+                      ) -> Tuple[bool, str, str]:
+        """
+        Create a compressed database backup using psycopg2.
+
+        Connects directly to the NEON database and exports every public table
+        to a gzip-compressed JSON file.  No local PostgreSQL installation is
+        required.
 
         Returns:
             Tuple of (success, backup_file_path, message)
         """
+        filename = None
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            if backup_name:
-                filename = f"{backup_name}_{timestamp}.backup"
-            else:
-                filename = f"cmms_backup_{timestamp}.backup"
-
+            base = backup_name if backup_name else 'cmms_backup'
+            filename = f"{base}_{timestamp}{BACKUP_FILE_EXTENSION}"
             backup_path = self.backup_dir / filename
 
             print(f"Creating backup: {backup_path}")
 
-            # Use pg_dump to create backup
-            env = os.environ.copy()
-            env['PGPASSWORD'] = self.db_config['password']
+            conn = self._connect()
+            cur = conn.cursor()
 
-            try:
-                pg_dump_path = _find_pg_binary('pg_dump')
-            except FileNotFoundError as e:
-                error_msg = f"pg_dump not found: {str(e)}"
-                print(error_msg)
+            # ---- Collect table names ----------------------------------------
+            cur.execute("""
+                SELECT table_name
+                FROM   information_schema.tables
+                WHERE  table_schema = 'public'
+                AND    table_type   = 'BASE TABLE'
+                ORDER  BY table_name
+            """)
+            tables = [row[0] for row in cur.fetchall()]
+
+            if not tables:
+                cur.close()
+                conn.close()
+                error_msg = "No tables found in the database."
                 self._log_backup(filename, 'failed', error_msg)
                 return False, "", error_msg
 
-            cmd = [
-                pg_dump_path,
-                '-h', self.db_config['host'],
-                '-p', str(self.db_config['port']),
-                '-U', self.db_config['user'],
-                '-d', self.db_config['database'],
-                '-F', 'c',  # Custom format (compressed)
-                '-f', str(backup_path)
-            ]
+            # ---- Dump each table --------------------------------------------
+            backup_data = {
+                'version': '2.0',
+                'app': 'AIT_CMMS',
+                'created_at': datetime.now().isoformat(),
+                'database': self.db_config.get('database', 'unknown'),
+                'host': self.db_config.get('host', 'unknown'),
+                'tables': {},
+            }
 
-            # Add verbose flag for debugging
-            cmd.append('-v')
+            total_rows = 0
+            for table in tables:
+                # Column names
+                cur.execute("""
+                    SELECT column_name
+                    FROM   information_schema.columns
+                    WHERE  table_schema = 'public'
+                    AND    table_name   = %s
+                    ORDER  BY ordinal_position
+                """, (table,))
+                columns = [row[0] for row in cur.fetchall()]
 
-            # Run pg_dump
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=600  # 10 minute timeout
-            )
+                # Row data
+                cur.execute(f'SELECT * FROM "{table}"')
+                raw_rows = cur.fetchall()
+                serialised_rows = [
+                    [_serialize_value(cell) for cell in row]
+                    for row in raw_rows
+                ]
 
-            if result.returncode != 0:
-                error_msg = f"pg_dump failed: {result.stderr}"
-                print(error_msg)
-                self._log_backup(filename, 'failed', error_msg)
-                return False, "", error_msg
+                backup_data['tables'][table] = {
+                    'columns': columns,
+                    'rows': serialised_rows,
+                }
+                total_rows += len(raw_rows)
+                print(f"  Backed up table '{table}': {len(raw_rows)} rows")
 
-            # Get file size
+            # ---- Collect sequence current values ----------------------------
+            cur.execute("""
+                SELECT sequence_name
+                FROM   information_schema.sequences
+                WHERE  sequence_schema = 'public'
+            """)
+            seq_names = [row[0] for row in cur.fetchall()]
+            sequences = {}
+            for seq in seq_names:
+                try:
+                    cur.execute(f'SELECT last_value FROM "{seq}"')
+                    row = cur.fetchone()
+                    if row:
+                        sequences[seq] = row[0]
+                except Exception:
+                    pass  # Some sequences may not be readable; skip them
+            backup_data['sequences'] = sequences
+
+            cur.close()
+            conn.close()
+
+            # ---- Write compressed backup ------------------------------------
+            json_bytes = json.dumps(backup_data, ensure_ascii=False).encode('utf-8')
+            with gzip.open(str(backup_path), 'wb') as gz:
+                gz.write(json_bytes)
+
             file_size = backup_path.stat().st_size
             file_size_mb = file_size / (1024 * 1024)
 
-            # Verify backup if configured
+            # ---- Optional verification --------------------------------------
             if self.config['verify_after_backup']:
-                print("Verifying backup...")
+                print("Verifying backup…")
                 verified, verify_msg = self._verify_backup(str(backup_path))
                 if not verified:
-                    self._log_backup(filename, 'failed', f"Verification failed: {verify_msg}", file_size)
-                    return False, str(backup_path), f"Backup created but verification failed: {verify_msg}"
+                    self._log_backup(filename, 'failed',
+                                     f"Verification failed: {verify_msg}", file_size)
+                    return False, str(backup_path), \
+                        f"Backup created but verification failed: {verify_msg}"
 
-            self._log_backup(filename, 'success', f"Size: {file_size_mb:.2f} MB", file_size)
+            self._log_backup(filename, 'success',
+                             f"Tables: {len(tables)}, Rows: {total_rows}, "
+                             f"Size: {file_size_mb:.2f} MB", file_size)
             self.last_backup_time = datetime.now()
 
-            print(f"Backup created successfully: {backup_path} ({file_size_mb:.2f} MB)")
-            return True, str(backup_path), f"Backup created: {file_size_mb:.2f} MB"
+            print(f"Backup created successfully: {backup_path} "
+                  f"({len(tables)} tables, {total_rows} rows, "
+                  f"{file_size_mb:.2f} MB)")
+            return True, str(backup_path), \
+                f"Backup created: {len(tables)} tables, {total_rows} rows, {file_size_mb:.2f} MB"
 
-        except subprocess.TimeoutExpired:
-            error_msg = "Backup timed out after 10 minutes"
-            print(error_msg)
-            self._log_backup(filename, 'failed', error_msg)
-            return False, "", error_msg
         except Exception as e:
             error_msg = f"Error creating backup: {str(e)}"
             print(error_msg)
-            self._log_backup(filename if 'filename' in locals() else 'unknown', 'failed', error_msg)
+            self._log_backup(
+                filename if filename else 'unknown', 'failed', error_msg)
             return False, "", error_msg
+
+    # ------------------------------------------------------------------
+    # Verify
+    # ------------------------------------------------------------------
 
     def _verify_backup(self, backup_path: str) -> Tuple[bool, str]:
         """
-        Verify backup integrity
-
-        Args:
-            backup_path: Path to backup file
+        Verify a backup file by reading and parsing its contents.
 
         Returns:
             Tuple of (is_valid, message)
         """
         try:
-            # Check if file exists and has content
             if not os.path.exists(backup_path):
                 return False, "Backup file not found"
 
             file_size = os.path.getsize(backup_path)
-            if file_size < 1000:  # Less than 1KB is suspicious
+            if file_size < 100:
                 return False, f"Backup file too small: {file_size} bytes"
 
-            # Use pg_restore to verify
-            env = os.environ.copy()
-            env['PGPASSWORD'] = self.db_config['password']
+            with gzip.open(backup_path, 'rb') as gz:
+                data = json.loads(gz.read().decode('utf-8'))
 
-            try:
-                pg_restore_path = _find_pg_binary('pg_restore')
-            except FileNotFoundError as e:
-                return False, f"pg_restore not found: {str(e)}"
+            if 'tables' not in data:
+                return False, "Backup file missing 'tables' key"
 
-            cmd = [
-                pg_restore_path,
-                '--list',
-                backup_path
-            ]
+            table_count = len(data['tables'])
+            if table_count == 0:
+                return False, "Backup contains no tables"
 
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=60
+            total_rows = sum(
+                len(t['rows']) for t in data['tables'].values()
+                if isinstance(t, dict) and 'rows' in t
             )
 
-            if result.returncode != 0:
-                return False, f"Verification failed: {result.stderr}"
-
-            # Check if restore list contains tables
-            if 'TABLE DATA' not in result.stdout:
-                return False, "Backup does not contain table data"
-
-            return True, "Backup verified successfully"
+            return True, (f"Verified: {table_count} tables, "
+                          f"{total_rows} rows, format v{data.get('version', '?')}")
 
         except Exception as e:
             return False, f"Verification error: {str(e)}"
 
-    def restore_backup(self, backup_path: str, confirm: bool = False) -> Tuple[bool, str]:
+    # ------------------------------------------------------------------
+    # Restore
+    # ------------------------------------------------------------------
+
+    def restore_backup(self, backup_path: str,
+                       confirm: bool = False) -> Tuple[bool, str]:
         """
-        Restore database from backup
+        Restore database from a .cmmsbackup file.
+
+        Clears all public tables then re-inserts the backed-up data using
+        psycopg2.  No local PostgreSQL installation is required.
 
         Args:
-            backup_path: Path to backup file
-            confirm: Must be True to actually perform restore
+            backup_path: Path to the .cmmsbackup file
+            confirm: Must be True to actually perform the restore
 
         Returns:
             Tuple of (success, message)
@@ -395,89 +489,124 @@ class BackupManager:
         if not confirm:
             return False, "Restore not confirmed. Set confirm=True to proceed."
 
+        conn = None
         try:
             if not os.path.exists(backup_path):
                 return False, f"Backup file not found: {backup_path}"
 
-            print(f"Restoring from backup: {backup_path}")
-            print("WARNING: This will overwrite the current database!")
+            print(f"Loading backup: {backup_path}")
+            with gzip.open(backup_path, 'rb') as gz:
+                data = json.loads(gz.read().decode('utf-8'))
 
-            env = os.environ.copy()
-            env['PGPASSWORD'] = self.db_config['password']
+            if 'tables' not in data:
+                return False, "Invalid backup file: missing 'tables' key"
 
-            try:
-                pg_restore_path = _find_pg_binary('pg_restore')
-            except FileNotFoundError as e:
-                return False, f"pg_restore not found: {str(e)}"
+            tables_data: Dict = data['tables']
+            if not tables_data:
+                return False, "Backup contains no tables to restore"
 
-            # First, terminate all connections to the database
-            # (This would require superuser privileges, so we'll skip it for now)
+            print("Restoring from backup — this will overwrite the current database!")
 
-            # Restore the backup
-            cmd = [
-                pg_restore_path,
-                '-h', self.db_config['host'],
-                '-p', str(self.db_config['port']),
-                '-U', self.db_config['user'],
-                '-d', self.db_config['database'],
-                '--clean',  # Clean (drop) database objects before recreating
-                '--if-exists',  # Use IF EXISTS when dropping objects
-                '--no-owner',  # Skip restoration of object ownership
-                '--no-acl',  # Skip restoration of access privileges
-                backup_path
-            ]
+            conn = self._connect()
+            conn.autocommit = False
+            cur = conn.cursor()
 
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
+            table_names = list(tables_data.keys())
 
-            if result.returncode != 0 and 'ERROR' in result.stderr:
-                # Some errors are expected (e.g., objects already exist)
-                # Only fail if there are critical errors
-                if 'FATAL' in result.stderr or 'could not connect' in result.stderr:
-                    return False, f"Restore failed: {result.stderr}"
+            # ---- Determine safe insert order (parents before children) ------
+            ordered_tables = _get_table_insert_order(conn, table_names)
 
-            print("Restore completed successfully")
-            return True, "Database restored successfully"
+            # ---- Truncate all tables at once (CASCADE handles FK order) -----
+            # Build the comma-separated quoted list
+            quoted = ', '.join(f'"{t}"' for t in table_names)
+            print(f"Truncating {len(table_names)} tables…")
+            cur.execute(f'TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE')
+
+            # ---- Re-insert data in FK-safe order ----------------------------
+            total_inserted = 0
+            for table in ordered_tables:
+                tdata = tables_data.get(table)
+                if not tdata:
+                    continue
+                columns = tdata.get('columns', [])
+                rows = tdata.get('rows', [])
+                if not columns or not rows:
+                    continue
+
+                col_list = ', '.join(f'"{c}"' for c in columns)
+                placeholders = ', '.join(['%s'] * len(columns))
+                insert_sql = (f'INSERT INTO "{table}" ({col_list}) '
+                              f'VALUES ({placeholders})')
+
+                decoded_rows = [
+                    tuple(_deserialize_value(cell) for cell in row)
+                    for row in rows
+                ]
+                cur.executemany(insert_sql, decoded_rows)
+                total_inserted += len(decoded_rows)
+                print(f"  Restored table '{table}': {len(decoded_rows)} rows")
+
+            # ---- Reset sequences to backed-up values ------------------------
+            sequences = data.get('sequences', {})
+            for seq_name, last_value in sequences.items():
+                try:
+                    cur.execute(
+                        f"SELECT setval(%s, %s, true)",
+                        (seq_name, last_value)
+                    )
+                except Exception as seq_err:
+                    print(f"  Warning: could not reset sequence '{seq_name}': {seq_err}")
+
+            conn.commit()
+            cur.close()
+
+            print(f"Restore completed: {len(ordered_tables)} tables, "
+                  f"{total_inserted} rows")
+            return True, (f"Database restored successfully: "
+                          f"{len(ordered_tables)} tables, {total_inserted} rows")
 
         except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             return False, f"Error restoring backup: {str(e)}"
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Cleanup / listing
+    # ------------------------------------------------------------------
 
     def cleanup_old_backups(self) -> int:
-        """
-        Remove old backups based on retention policy
-
-        Returns:
-            Number of backups removed
-        """
+        """Remove old backups based on the configured retention policy."""
         removed_count = 0
-
         try:
-            # Get all backup files
-            backup_files = sorted(self.backup_dir.glob("*.backup"))
+            backup_files = sorted(
+                self.backup_dir.glob(f"*{BACKUP_FILE_EXTENSION}"))
 
-            # Remove backups older than retention_days
-            cutoff_date = datetime.now() - timedelta(days=self.config['retention_days'])
+            cutoff_date = datetime.now() - timedelta(
+                days=self.config['retention_days'])
 
-            for backup_file in backup_files:
-                file_time = datetime.fromtimestamp(backup_file.stat().st_mtime)
-
+            for bf in backup_files:
+                file_time = datetime.fromtimestamp(bf.stat().st_mtime)
                 if file_time < cutoff_date:
-                    print(f"Removing old backup: {backup_file.name}")
-                    backup_file.unlink()
+                    print(f"Removing old backup: {bf.name}")
+                    bf.unlink()
                     removed_count += 1
 
-            # If still over max_backups, remove oldest
-            backup_files = sorted(self.backup_dir.glob("*.backup"))
+            backup_files = sorted(
+                self.backup_dir.glob(f"*{BACKUP_FILE_EXTENSION}"))
             if len(backup_files) > self.config['max_backups']:
-                excess_count = len(backup_files) - self.config['max_backups']
-                for backup_file in backup_files[:excess_count]:
-                    print(f"Removing excess backup: {backup_file.name}")
-                    backup_file.unlink()
+                excess = len(backup_files) - self.config['max_backups']
+                for bf in backup_files[:excess]:
+                    print(f"Removing excess backup: {bf.name}")
+                    bf.unlink()
                     removed_count += 1
 
         except Exception as e:
@@ -486,182 +615,142 @@ class BackupManager:
         return removed_count
 
     def list_backups(self) -> List[Dict]:
-        """
-        List all available backups
-
-        Returns:
-            List of backup information dictionaries
-        """
+        """List all available backups."""
         backups = []
-
         try:
-            backup_files = sorted(self.backup_dir.glob("*.backup"), reverse=True)
-
-            for backup_file in backup_files:
-                stat = backup_file.stat()
+            backup_files = sorted(
+                self.backup_dir.glob(f"*{BACKUP_FILE_EXTENSION}"),
+                reverse=True)
+            for bf in backup_files:
+                stat = bf.stat()
                 backups.append({
-                    'filename': backup_file.name,
-                    'path': str(backup_file),
+                    'filename': bf.name,
+                    'path': str(bf),
                     'size': stat.st_size,
                     'size_mb': stat.st_size / (1024 * 1024),
-                    'created': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
-                    'age_days': (datetime.now() - datetime.fromtimestamp(stat.st_mtime)).days
+                    'created': datetime.fromtimestamp(
+                        stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                    'age_days': (
+                        datetime.now() -
+                        datetime.fromtimestamp(stat.st_mtime)).days,
                 })
-
         except Exception as e:
             print(f"Error listing backups: {e}")
-
         return backups
 
     def get_backup_log(self, limit: int = 50) -> List[Dict]:
-        """
-        Get backup log entries
-
-        Args:
-            limit: Maximum number of entries to return
-
-        Returns:
-            List of log entries
-        """
+        """Get the most recent backup log entries."""
         if not self.backup_log_file.exists():
             return []
-
         try:
             with open(self.backup_log_file, 'r') as f:
-                log = json.load(f)
-                return log[-limit:]
+                return json.load(f)[-limit:]
         except Exception as e:
             print(f"Error reading backup log: {e}")
             return []
 
+    # ------------------------------------------------------------------
+    # Automatic backup scheduling
+    # ------------------------------------------------------------------
+
     def start_automatic_backups(self):
-        """Start automatic backup thread"""
+        """Start the background automatic-backup thread."""
         if self.backup_thread and self.backup_thread.is_alive():
             print("Automatic backups already running")
             return
-
         if not self.config['enabled']:
             print("Automatic backups disabled in configuration")
             return
-
         self.stop_event.clear()
-        self.backup_thread = threading.Thread(target=self._backup_loop, daemon=True)
+        self.backup_thread = threading.Thread(
+            target=self._backup_loop, daemon=True)
         self.backup_thread.start()
         print("Automatic backups started")
 
     def stop_automatic_backups(self):
-        """Stop automatic backup thread"""
+        """Stop the background automatic-backup thread."""
         if self.backup_thread and self.backup_thread.is_alive():
             self.stop_event.set()
             self.backup_thread.join(timeout=5)
             print("Automatic backups stopped")
 
     def _backup_loop(self):
-        """Main loop for automatic backups"""
         print("Backup loop started")
-
         while not self.stop_event.is_set():
             try:
-                # Check if it's time for a backup
                 if self._should_run_backup():
-                    print("Running scheduled backup...")
+                    print("Running scheduled backup…")
                     success, path, msg = self.create_backup()
-
                     if success:
                         print(f"Scheduled backup successful: {msg}")
-                        # Cleanup old backups
                         removed = self.cleanup_old_backups()
-                        if removed > 0:
+                        if removed:
                             print(f"Removed {removed} old backup(s)")
                     else:
                         print(f"Scheduled backup failed: {msg}")
-
-                # Sleep for 5 minutes before checking again
                 self.stop_event.wait(300)
-
             except Exception as e:
                 print(f"Error in backup loop: {e}")
                 self.stop_event.wait(60)
 
     def _should_run_backup(self) -> bool:
-        """
-        Check if a backup should be run now based on schedule
-
-        Returns:
-            True if backup should run
-        """
+        """Return True if a scheduled backup is due right now."""
         now = datetime.now()
-
-        # If no backup has been done yet, do one now
         if self.last_backup_time is None:
             return True
-
-        # Parse configured backup time
         try:
-            backup_hour, backup_minute = map(int, self.config['backup_time'].split(':'))
-        except:
-            backup_hour, backup_minute = 2, 0  # Default to 2:00 AM
+            backup_hour, backup_minute = map(
+                int, self.config['backup_time'].split(':'))
+        except Exception:
+            backup_hour, backup_minute = 2, 0
 
-        # Check if we're past the backup time today
-        backup_time_today = now.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
-
-        # Calculate time since last backup
+        backup_time_today = now.replace(
+            hour=backup_hour, minute=backup_minute,
+            second=0, microsecond=0)
         time_since_last = now - self.last_backup_time
 
-        # Check schedule
-        if self.config['schedule'] == 'daily':
-            # Run daily at configured time
-            if now >= backup_time_today and self.last_backup_time < backup_time_today:
-                return True
-        elif self.config['schedule'] == 'weekly':
-            # Run weekly on Monday at configured time
-            if now.weekday() == 0 and time_since_last.days >= 7:
-                if now >= backup_time_today and self.last_backup_time < backup_time_today:
-                    return True
-        elif self.config['schedule'] == 'monthly':
-            # Run monthly on 1st at configured time
-            if now.day == 1 and time_since_last.days >= 28:
-                if now >= backup_time_today and self.last_backup_time < backup_time_today:
-                    return True
-
+        schedule = self.config['schedule']
+        if schedule == 'daily':
+            return (now >= backup_time_today and
+                    self.last_backup_time < backup_time_today)
+        if schedule == 'weekly':
+            return (now.weekday() == 0 and
+                    time_since_last.days >= 7 and
+                    now >= backup_time_today and
+                    self.last_backup_time < backup_time_today)
+        if schedule == 'monthly':
+            return (now.day == 1 and
+                    time_since_last.days >= 28 and
+                    now >= backup_time_today and
+                    self.last_backup_time < backup_time_today)
         return False
 
-    def update_config(self, new_config: Dict):
-        """
-        Update backup configuration
+    # ------------------------------------------------------------------
+    # Config / status
+    # ------------------------------------------------------------------
 
-        Args:
-            new_config: Dictionary with new configuration values
-        """
+    def update_config(self, new_config: Dict):
         self.config.update(new_config)
         self._save_config()
         print("Backup configuration updated")
 
     def get_config(self) -> Dict:
-        """Get current backup configuration"""
         return self.config.copy()
 
     def get_status(self) -> Dict:
-        """
-        Get backup system status
-
-        Returns:
-            Dictionary with status information
-        """
         backups = self.list_backups()
-
         status = {
             'enabled': self.config['enabled'],
-            'automatic_running': self.backup_thread and self.backup_thread.is_alive(),
+            'automatic_running': (self.backup_thread and
+                                  self.backup_thread.is_alive()),
             'last_backup': None,
             'next_backup_estimate': None,
             'total_backups': len(backups),
             'total_size_mb': sum(b['size_mb'] for b in backups),
             'oldest_backup': backups[-1]['created'] if backups else None,
-            'newest_backup': backups[0]['created'] if backups else None
+            'newest_backup': backups[0]['created'] if backups else None,
         }
-
         if self.last_backup_time:
-            status['last_backup'] = self.last_backup_time.strftime('%Y-%m-%d %H:%M:%S')
-
+            status['last_backup'] = self.last_backup_time.strftime(
+                '%Y-%m-%d %H:%M:%S')
         return status
