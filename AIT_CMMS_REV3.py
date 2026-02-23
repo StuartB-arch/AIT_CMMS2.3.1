@@ -6688,26 +6688,50 @@ class AITCMMSSystem:
             return None
 
     def update_pm_completion_form_with_template(self):
-        """Update PM completion form when equipment is selected
+        """Update PM completion form when equipment is selected.
 
-        NOTE: PM type and technician are manually filled by user.
-        PM Due Date is auto-filled from the schedule when BFM and PM type are set.
-        Labor hours are auto-populated from templates.
+        Auto-populates technician, PM type, due date, and labor hours from
+        the weekly schedule when a BFM number is entered.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
-        if bfm_no and pm_type:
-            # Auto-fill PM Due Date from schedule
-            try:
-                cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
+        if not bfm_no:
+            return
 
+        try:
+            cursor = self.conn.cursor()
+            # Calculate current week's start date (Monday)
+            today = datetime.now().date()
+            current_week_start = today - timedelta(days=today.weekday())
+
+            if not pm_type:
+                # BFM entered but no PM type yet - look up the full schedule entry
+                # to auto-fill PM type, technician, and due date
                 cursor.execute('''
-                    SELECT scheduled_date
+                    SELECT pm_type, assigned_technician, scheduled_date
+                    FROM weekly_pm_schedules
+                    WHERE bfm_equipment_no = %s AND status = 'Scheduled'
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
+                    LIMIT 1
+                ''', (bfm_no, current_week_start))
+
+                schedule_result = cursor.fetchone()
+                if schedule_result:
+                    sched_pm_type, sched_technician, sched_date = schedule_result
+                    if sched_pm_type:
+                        self.pm_type_var.set(sched_pm_type)
+                        pm_type = sched_pm_type
+                    if sched_technician:
+                        self.completion_tech_var.set(sched_technician)
+                    if sched_date:
+                        self.pm_due_date_var.set(sched_date)
+                    self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
+            else:
+                # Both BFM and PM type are set - look up specific schedule entry
+                cursor.execute('''
+                    SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
                       AND week_start_date = %s
@@ -6716,14 +6740,18 @@ class AITCMMSSystem:
                 ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
-                if schedule_result and schedule_result[0]:
-                    scheduled_date = schedule_result[0]
-                    self.pm_due_date_var.set(scheduled_date)
-                    self.update_status(f"PM Due Date: {scheduled_date}")
-            except Exception as e:
-                print(f"Warning: Could not retrieve scheduled date: {e}")
+                if schedule_result:
+                    sched_technician, sched_date = schedule_result
+                    if sched_technician:
+                        self.completion_tech_var.set(sched_technician)
+                    if sched_date:
+                        self.pm_due_date_var.set(sched_date)
+                    self.update_status(f"PM Due Date: {sched_date}")
+        except Exception as e:
+            print(f"Warning: Could not retrieve schedule data: {e}")
 
-            # Auto-populate labor hours from template
+        # Auto-populate labor hours from template when both fields are set
+        if bfm_no and pm_type:
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
@@ -9527,26 +9555,50 @@ class AITCMMSSystem:
             return None
 
     def update_pm_completion_form_with_template(self):
-        """Update PM completion form when equipment is selected
+        """Update PM completion form when equipment is selected.
 
-        NOTE: PM type and technician are manually filled by user.
-        PM Due Date is auto-filled from the schedule when BFM and PM type are set.
-        Labor hours are auto-populated from templates.
+        Auto-populates technician, PM type, due date, and labor hours from
+        the weekly schedule when a BFM number is entered.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
 
-        # Auto-populate PM Due Date and labor hours when both BFM and PM type are set
-        if bfm_no and pm_type:
-            # Auto-fill PM Due Date from schedule
-            try:
-                cursor = self.conn.cursor()
-                # Calculate current week's start date (Monday)
-                today = datetime.now().date()
-                current_week_start = today - timedelta(days=today.weekday())
+        if not bfm_no:
+            return
 
+        try:
+            cursor = self.conn.cursor()
+            # Calculate current week's start date (Monday)
+            today = datetime.now().date()
+            current_week_start = today - timedelta(days=today.weekday())
+
+            if not pm_type:
+                # BFM entered but no PM type yet - look up the full schedule entry
+                # to auto-fill PM type, technician, and due date
                 cursor.execute('''
-                    SELECT scheduled_date
+                    SELECT pm_type, assigned_technician, scheduled_date
+                    FROM weekly_pm_schedules
+                    WHERE bfm_equipment_no = %s AND status = 'Scheduled'
+                      AND week_start_date = %s
+                    ORDER BY scheduled_date ASC
+                    LIMIT 1
+                ''', (bfm_no, current_week_start))
+
+                schedule_result = cursor.fetchone()
+                if schedule_result:
+                    sched_pm_type, sched_technician, sched_date = schedule_result
+                    if sched_pm_type:
+                        self.pm_type_var.set(sched_pm_type)
+                        pm_type = sched_pm_type
+                    if sched_technician:
+                        self.completion_tech_var.set(sched_technician)
+                    if sched_date:
+                        self.pm_due_date_var.set(sched_date)
+                    self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
+            else:
+                # Both BFM and PM type are set - look up specific schedule entry
+                cursor.execute('''
+                    SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
                       AND week_start_date = %s
@@ -9555,14 +9607,18 @@ class AITCMMSSystem:
                 ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
-                if schedule_result and schedule_result[0]:
-                    scheduled_date = schedule_result[0]
-                    self.pm_due_date_var.set(scheduled_date)
-                    self.update_status(f"PM Due Date: {scheduled_date}")
-            except Exception as e:
-                print(f"Warning: Could not retrieve scheduled date: {e}")
+                if schedule_result:
+                    sched_technician, sched_date = schedule_result
+                    if sched_technician:
+                        self.completion_tech_var.set(sched_technician)
+                    if sched_date:
+                        self.pm_due_date_var.set(sched_date)
+                    self.update_status(f"PM Due Date: {sched_date}")
+        except Exception as e:
+            print(f"Warning: Could not retrieve schedule data: {e}")
 
-            # Auto-populate labor hours from template
+        # Auto-populate labor hours from template when both fields are set
+        if bfm_no and pm_type:
             template = self.get_pm_template_for_equipment(bfm_no, pm_type)
             if template:
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
@@ -11443,18 +11499,20 @@ class AITCMMSSystem:
         self.completion_bfm_var = tk.StringVar()
         bfm_combo = ttk.Combobox(form_frame, textvariable=self.completion_bfm_var, width=20)
         bfm_combo.grid(row=row, column=1, sticky='w', padx=5, pady=5)
-        bfm_combo.bind('<KeyRelease>', self.update_equipment_suggestions)
+        # KeyRelease updates equipment suggestions AND triggers auto-populate
+        bfm_combo.bind('<KeyRelease>', lambda e: (self.update_equipment_suggestions(e), self.update_pm_completion_form_with_template()))
+        # ComboboxSelected triggers auto-populate when user picks from the dropdown
+        bfm_combo.bind('<<ComboboxSelected>>', lambda e: self.update_pm_completion_form_with_template())
         self.bfm_combo = bfm_combo
         row += 1
-        
+
         # PM Type
         ttk.Label(form_frame, text="PM Type (auto-filled from schedule):").grid(row=row, column=0, sticky='w', pady=5)
         self.pm_type_var = tk.StringVar()
         pm_type_combo = ttk.Combobox(form_frame, textvariable=self.pm_type_var,
                                    values=['Weekly', 'Monthly', 'Six Month', 'Annual'], width=20)
-        # Bind PM type and equipment changes to template lookup
+        # Bind PM type changes to re-check schedule for technician/due date
         pm_type_combo.bind('<<ComboboxSelected>>', lambda e: self.update_pm_completion_form_with_template())
-        self.bfm_combo.bind('<KeyRelease>', lambda e: self.update_pm_completion_form_with_template())
         pm_type_combo.grid(row=row, column=1, sticky='w', padx=5, pady=5)
         row += 1
         
