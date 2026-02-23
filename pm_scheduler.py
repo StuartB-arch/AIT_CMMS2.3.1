@@ -132,6 +132,8 @@ class CompletionRecordRepository:
                     pm_type = PMType.WEEKLY
                 elif pm_type_str == "Monthly":
                     pm_type = PMType.MONTHLY
+                elif pm_type_str == "Six Month":
+                    pm_type = PMType.SIX_MONTH
                 else:
                     pm_type = PMType.ANNUAL
 
@@ -170,6 +172,8 @@ class CompletionRecordRepository:
                     pm_type = PMType.WEEKLY
                 elif pm_type_str == "Monthly":
                     pm_type = PMType.MONTHLY
+                elif pm_type_str == "Six Month":
+                    pm_type = PMType.SIX_MONTH
                 else:
                     pm_type = PMType.ANNUAL
 
@@ -241,16 +245,22 @@ class CompletionRecordRepository:
         print(f"DEBUG: Loaded scheduled PMs for {len(self._scheduled_cache)} equipment items")
 
     def bulk_load_uncompleted_schedules(self, before_week: datetime) -> None:
-        """Load ALL uncompleted schedules from PREVIOUS weeks in one query - CRITICAL PERFORMANCE FIX"""
-        print(f"DEBUG: Bulk loading uncompleted schedules from previous weeks...")
+        """Load uncompleted schedules from recent previous weeks (last 2 weeks only).
+
+        IMPORTANT: Limited to 2-week lookback to prevent old uncompleted schedules
+        from permanently blocking equipment from being rescheduled.
+        """
+        print(f"DEBUG: Bulk loading uncompleted schedules from previous 2 weeks...")
         cursor = self.conn.cursor()
+        lookback_limit = (before_week - timedelta(days=14)).strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT bfm_equipment_no, pm_type, week_start_date, assigned_technician, status, scheduled_date
             FROM weekly_pm_schedules
             WHERE week_start_date < %s
+            AND week_start_date >= %s
             AND status = 'Scheduled'
             ORDER BY bfm_equipment_no, pm_type, week_start_date DESC
-        ''', (before_week.strftime('%Y-%m-%d'),))
+        ''', (before_week.strftime('%Y-%m-%d'), lookback_limit))
 
         # Group uncompleted schedules by equipment + PM type
         self._uncompleted_cache = {}
@@ -274,7 +284,11 @@ class CompletionRecordRepository:
         print(f"DEBUG: Loaded uncompleted schedules for {len(self._uncompleted_cache)} equipment+PM type combinations")
 
     def get_uncompleted_schedules(self, bfm_no: str, pm_type: PMType, before_week: datetime) -> List[Dict]:
-        """Get uncompleted scheduled PMs for equipment from PREVIOUS weeks"""
+        """Get uncompleted scheduled PMs for equipment from recent previous weeks.
+
+        Only looks back 2 weeks to prevent old uncompleted schedules from
+        permanently blocking equipment from being rescheduled.
+        """
         # Use cache if available
         if self._uncompleted_cache is not None:
             cache_key = f"{bfm_no}_{pm_type.value}"
@@ -282,16 +296,18 @@ class CompletionRecordRepository:
 
         # Fallback to individual query if cache not loaded
         cursor = self.conn.cursor()
+        lookback_limit = (before_week - timedelta(days=14)).strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT week_start_date, assigned_technician, status, scheduled_date
             FROM weekly_pm_schedules
             WHERE bfm_equipment_no = %s
             AND pm_type = %s
             AND week_start_date < %s
+            AND week_start_date >= %s
             AND status = 'Scheduled'
             ORDER BY week_start_date DESC
             LIMIT 5
-        ''', (bfm_no, pm_type.value, before_week.strftime('%Y-%m-%d')))
+        ''', (bfm_no, pm_type.value, before_week.strftime('%Y-%m-%d'), lookback_limit))
 
         return [{'week_start': row[0], 'technician': row[1], 'status': row[2], 'scheduled_date': row[3]}
                 for row in cursor.fetchall()]

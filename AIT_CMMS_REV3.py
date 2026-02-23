@@ -337,20 +337,26 @@ class CompletionRecordRepository:
         print(f"DEBUG: Loaded scheduled PMs for {len(self._scheduled_cache)} equipment items")
 
     def bulk_load_uncompleted_schedules(self, before_week: datetime) -> None:
-        """Load ALL uncompleted schedules from PREVIOUS weeks in one query - CRITICAL PERFORMANCE FIX
+        """Load uncompleted schedules from recent previous weeks (last 2 weeks only).
 
         This fixes the N+1 query problem where get_uncompleted_schedules() was called
         individually for each equipment item, causing thousands of queries.
+
+        IMPORTANT: Limited to 2-week lookback to prevent old uncompleted schedules
+        from permanently blocking equipment from being rescheduled.  Stale schedules
+        older than 2 weeks are expired to 'Expired' status during generation.
         """
-        print(f"DEBUG: Bulk loading uncompleted schedules from previous weeks...")
+        print(f"DEBUG: Bulk loading uncompleted schedules from previous 2 weeks...")
         cursor = self.conn.cursor()
+        lookback_limit = (before_week - timedelta(days=14)).strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT bfm_equipment_no, pm_type, week_start_date, assigned_technician, status, scheduled_date
             FROM weekly_pm_schedules
             WHERE week_start_date < %s
+            AND week_start_date >= %s
             AND status = 'Scheduled'
             ORDER BY bfm_equipment_no, pm_type, week_start_date DESC
-        ''', (before_week.strftime('%Y-%m-%d'),))
+        ''', (before_week.strftime('%Y-%m-%d'), lookback_limit))
 
         # Group uncompleted schedules by equipment + PM type
         self._uncompleted_cache = {}
@@ -374,11 +380,10 @@ class CompletionRecordRepository:
         print(f"DEBUG: Loaded uncompleted schedules for {len(self._uncompleted_cache)} equipment+PM type combinations")
 
     def get_uncompleted_schedules(self, bfm_no: str, pm_type: PMType, before_week: datetime) -> List[Dict]:
-        """Get uncompleted scheduled PMs for equipment from PREVIOUS weeks (before the specified week)
+        """Get uncompleted scheduled PMs for equipment from recent previous weeks.
 
-        This is CRITICAL to prevent duplicate scheduling:
-        - If equipment was scheduled in a previous week but NOT completed
-        - It should NOT be scheduled again in the current week
+        Only looks back 2 weeks to prevent old uncompleted schedules from
+        permanently blocking equipment from being rescheduled.
 
         PERFORMANCE FIX: Use cache if available to avoid N+1 query problem
         """
@@ -389,16 +394,18 @@ class CompletionRecordRepository:
 
         # Fallback to individual query if cache not loaded
         cursor = self.conn.cursor()
+        lookback_limit = (before_week - timedelta(days=14)).strftime('%Y-%m-%d')
         cursor.execute('''
             SELECT week_start_date, assigned_technician, status, scheduled_date
             FROM weekly_pm_schedules
             WHERE bfm_equipment_no = %s
             AND pm_type = %s
             AND week_start_date < %s
+            AND week_start_date >= %s
             AND status = 'Scheduled'
             ORDER BY week_start_date DESC
             LIMIT 5
-        ''', (bfm_no, pm_type.value, before_week.strftime('%Y-%m-%d')))
+        ''', (bfm_no, pm_type.value, before_week.strftime('%Y-%m-%d'), lookback_limit))
 
         uncompleted = []
         for row in cursor.fetchall():
@@ -721,6 +728,19 @@ class PMAssignmentGenerator:
         potential_assignments = []
         equipment_priority_map = {}  # Map to store equipment priority
 
+        # Debug counters to track rejection reasons
+        rejection_counts = {
+            'inactive': 0,
+            'not_due': 0,
+            'recently_completed': 0,
+            'conflicted_uncompleted': 0,
+            'conflicted_cross_pm': 0,
+            'conflicted_already_scheduled': 0,
+            'conflicted_other': 0,
+            'due': 0,
+            'skipped_lower_pm': 0,  # Skipped because a higher-priority PM type was assigned
+        }
+
         total_equipment = len(equipment_list)
         print(f"DEBUG: Processing {total_equipment} equipment items...")
 
@@ -734,10 +754,14 @@ class PMAssignmentGenerator:
 
             # Skip inactive equipment
             if equipment.status not in ['Active']:
+                rejection_counts['inactive'] += 1
                 continue
 
             # Store equipment priority for later sorting
             equipment_priority_map[equipment.bfm_no] = equipment.priority
+
+            # Track whether any PM type was assigned for this equipment
+            equipment_assigned = False
 
             # Check Weekly PM eligibility
             if equipment.has_weekly:
@@ -752,6 +776,21 @@ class PMAssignmentGenerator:
                         weekly_result.priority_score,
                         weekly_result.reason
                     ))
+                    equipment_assigned = True
+                    rejection_counts['due'] += 1
+                elif weekly_result.status == PMStatus.NOT_DUE:
+                    rejection_counts['not_due'] += 1
+                elif weekly_result.status == PMStatus.RECENTLY_COMPLETED:
+                    rejection_counts['recently_completed'] += 1
+                elif weekly_result.status == PMStatus.CONFLICTED:
+                    if 'uncompleted' in weekly_result.reason:
+                        rejection_counts['conflicted_uncompleted'] += 1
+                    elif 'Already scheduled' in weekly_result.reason:
+                        rejection_counts['conflicted_already_scheduled'] += 1
+                    elif 'blocked' in weekly_result.reason:
+                        rejection_counts['conflicted_cross_pm'] += 1
+                    else:
+                        rejection_counts['conflicted_other'] += 1
 
             # Check Monthly PM eligibility (only if Weekly isn't being assigned)
             if equipment.has_monthly:
@@ -761,7 +800,9 @@ class PMAssignmentGenerator:
                     for a in potential_assignments
                 )
 
-                if not has_weekly_assignment:
+                if has_weekly_assignment:
+                    rejection_counts['skipped_lower_pm'] += 1
+                elif not has_weekly_assignment:
                     monthly_result = self.eligibility_checker.check_eligibility(
                         equipment, PMType.MONTHLY, week_start
                     )
@@ -773,6 +814,21 @@ class PMAssignmentGenerator:
                             monthly_result.priority_score,
                             monthly_result.reason
                         ))
+                        equipment_assigned = True
+                        rejection_counts['due'] += 1
+                    elif monthly_result.status == PMStatus.NOT_DUE:
+                        rejection_counts['not_due'] += 1
+                    elif monthly_result.status == PMStatus.RECENTLY_COMPLETED:
+                        rejection_counts['recently_completed'] += 1
+                    elif monthly_result.status == PMStatus.CONFLICTED:
+                        if 'uncompleted' in monthly_result.reason:
+                            rejection_counts['conflicted_uncompleted'] += 1
+                        elif 'Already scheduled' in monthly_result.reason:
+                            rejection_counts['conflicted_already_scheduled'] += 1
+                        elif 'blocked' in monthly_result.reason:
+                            rejection_counts['conflicted_cross_pm'] += 1
+                        else:
+                            rejection_counts['conflicted_other'] += 1
 
             # Check 6-month PM eligibility (only if Weekly or Monthly isn't being assigned)
             if equipment.has_six_month:
@@ -786,7 +842,9 @@ class PMAssignmentGenerator:
                     for a in potential_assignments
                 )
 
-                if not has_weekly_assignment and not has_monthly_assignment:
+                if has_weekly_assignment or has_monthly_assignment:
+                    rejection_counts['skipped_lower_pm'] += 1
+                else:
                     six_month_result = self.eligibility_checker.check_eligibility(
                         equipment, PMType.SIX_MONTH, week_start
                     )
@@ -798,6 +856,21 @@ class PMAssignmentGenerator:
                             six_month_result.priority_score,
                             six_month_result.reason
                         ))
+                        equipment_assigned = True
+                        rejection_counts['due'] += 1
+                    elif six_month_result.status == PMStatus.NOT_DUE:
+                        rejection_counts['not_due'] += 1
+                    elif six_month_result.status == PMStatus.RECENTLY_COMPLETED:
+                        rejection_counts['recently_completed'] += 1
+                    elif six_month_result.status == PMStatus.CONFLICTED:
+                        if 'uncompleted' in six_month_result.reason:
+                            rejection_counts['conflicted_uncompleted'] += 1
+                        elif 'Already scheduled' in six_month_result.reason:
+                            rejection_counts['conflicted_already_scheduled'] += 1
+                        elif 'blocked' in six_month_result.reason:
+                            rejection_counts['conflicted_cross_pm'] += 1
+                        else:
+                            rejection_counts['conflicted_other'] += 1
 
             # Check Annual PM eligibility (only if Weekly, Monthly, or 6-month isn't being assigned)
             if equipment.has_annual:
@@ -815,7 +888,9 @@ class PMAssignmentGenerator:
                     for a in potential_assignments
                 )
 
-                if not has_weekly_assignment and not has_monthly_assignment and not has_six_month_assignment:
+                if has_weekly_assignment or has_monthly_assignment or has_six_month_assignment:
+                    rejection_counts['skipped_lower_pm'] += 1
+                else:
                     annual_result = self.eligibility_checker.check_eligibility(
                         equipment, PMType.ANNUAL, week_start
                     )
@@ -827,9 +902,34 @@ class PMAssignmentGenerator:
                             annual_result.priority_score,
                             annual_result.reason
                         ))
+                        equipment_assigned = True
+                        rejection_counts['due'] += 1
+                    elif annual_result.status == PMStatus.NOT_DUE:
+                        rejection_counts['not_due'] += 1
+                    elif annual_result.status == PMStatus.RECENTLY_COMPLETED:
+                        rejection_counts['recently_completed'] += 1
+                    elif annual_result.status == PMStatus.CONFLICTED:
+                        if 'uncompleted' in annual_result.reason:
+                            rejection_counts['conflicted_uncompleted'] += 1
+                        elif 'Already scheduled' in annual_result.reason:
+                            rejection_counts['conflicted_already_scheduled'] += 1
+                        elif 'blocked' in annual_result.reason:
+                            rejection_counts['conflicted_cross_pm'] += 1
+                        else:
+                            rejection_counts['conflicted_other'] += 1
 
         print(f"DEBUG: Finished processing all {total_equipment} equipment items")
         print(f"DEBUG: Found {len(potential_assignments)} potential assignments")
+        print(f"DEBUG: === Eligibility Summary ===")
+        print(f"DEBUG:   Due (assigned):              {rejection_counts['due']}")
+        print(f"DEBUG:   Not due yet:                 {rejection_counts['not_due']}")
+        print(f"DEBUG:   Recently completed:          {rejection_counts['recently_completed']}")
+        print(f"DEBUG:   Blocked by uncompleted sched:{rejection_counts['conflicted_uncompleted']}")
+        print(f"DEBUG:   Blocked by cross-PM conflict:{rejection_counts['conflicted_cross_pm']}")
+        print(f"DEBUG:   Already scheduled this week: {rejection_counts['conflicted_already_scheduled']}")
+        print(f"DEBUG:   Other conflict:              {rejection_counts['conflicted_other']}")
+        print(f"DEBUG:   Skipped (higher PM assigned):{rejection_counts['skipped_lower_pm']}")
+        print(f"DEBUG:   Inactive equipment:          {rejection_counts['inactive']}")
 
         # Sort by priority level first (P1, P2, P3, then others), then by priority_score (days overdue)
         # Priority level: 1 (P1) comes first, then 2 (P2), then 3 (P3), then 99 (others)
@@ -962,6 +1062,21 @@ class PMSchedulingService:
                 'DELETE FROM weekly_pm_schedules WHERE week_start_date = %s',
                 (week_start_str,)
             )
+
+            # Expire old uncompleted schedules (>2 weeks old) to prevent permanent blocking.
+            # Without this, any equipment that was scheduled in a previous week but not
+            # completed would be permanently blocked from rescheduling because the
+            # eligibility checker treats any uncompleted schedule as a conflict.
+            two_weeks_ago = (week_start - timedelta(days=14)).strftime('%Y-%m-%d')
+            cursor.execute('''
+                UPDATE weekly_pm_schedules
+                SET status = 'Expired'
+                WHERE week_start_date < %s
+                AND status = 'Scheduled'
+            ''', (two_weeks_ago,))
+            expired_count = cursor.rowcount
+            if expired_count > 0:
+                print(f"DEBUG: Expired {expired_count} old uncompleted schedules (older than 2 weeks)")
 
             # Load scheduled PMs AFTER deletion so the cache reflects the clean state.
             # Previously this was loaded BEFORE deletion, which left stale entries in
