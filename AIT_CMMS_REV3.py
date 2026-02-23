@@ -956,17 +956,19 @@ class PMSchedulingService:
                 # Note: In production, this should show a confirmation dialog to the user
                 # For now, we'll proceed but log the warning
 
-            # CRITICAL FIX #3: Load scheduled PMs BEFORE deletion
-            # This ensures the "already scheduled" check works correctly
-            print(f"DEBUG: Loading existing schedules before deletion...")
-            self.completion_repo.bulk_load_scheduled(week_start)
-
             # Clear existing assignments for this week
             print(f"DEBUG: Deleting existing schedules for week {week_start_str}...")
             cursor.execute(
                 'DELETE FROM weekly_pm_schedules WHERE week_start_date = %s',
                 (week_start_str,)
             )
+
+            # Load scheduled PMs AFTER deletion so the cache reflects the clean state.
+            # Previously this was loaded BEFORE deletion, which left stale entries in
+            # the cache causing the eligibility checker to reject PMs as "Already
+            # scheduled for this week" even though they had just been deleted.
+            print(f"DEBUG: Loading scheduled PMs (post-deletion, should be empty)...")
+            self.completion_repo.bulk_load_scheduled(week_start)
 
             # Get equipment list
             equipment_list = self._get_active_equipment()
@@ -987,8 +989,8 @@ class PMSchedulingService:
             # This reduces thousands of individual queries to just 4 bulk queries
             print(f"DEBUG: OPTIMIZATION - Pre-loading all data to avoid slow individual queries...")
             self.completion_repo.bulk_load_completions(days=400)
-            self.completion_repo.bulk_load_uncompleted_schedules(week_start)  # CRITICAL FIX: Bulk load uncompleted schedules
-            # Note: bulk_load_scheduled was moved BEFORE deletion (see above)
+            self.completion_repo.bulk_load_uncompleted_schedules(week_start)
+            # Note: bulk_load_scheduled is done above, right after deletion
             self.eligibility_checker.bulk_load_next_annual()
             print(f"DEBUG: OPTIMIZATION - Data pre-loading complete!")
 
