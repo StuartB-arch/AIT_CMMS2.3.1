@@ -6702,21 +6702,20 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            # Use today's date as the upper bound so we don't pick up future schedules
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             if not pm_type:
-                # BFM entered but no PM type yet - look up the full schedule entry
-                # to auto-fill PM type, technician, and due date
+                # BFM entered but no PM type yet - look up the most recent outstanding
+                # schedule entry to auto-fill PM type, technician, and due date
                 cursor.execute('''
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                      AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, current_week_start))
+                ''', (bfm_no, today_str))
 
                 schedule_result = cursor.fetchone()
                 cursor.close()
@@ -6731,15 +6730,15 @@ class AITCMMSSystem:
                         self.pm_due_date_var.set(sched_date)
                     self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
             else:
-                # Both BFM and PM type are set - look up specific schedule entry
+                # Both BFM and PM type are set - look up most recent outstanding schedule entry
                 cursor.execute('''
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                      AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type, today_str))
 
                 schedule_result = cursor.fetchone()
                 cursor.close()
@@ -9573,21 +9572,20 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            # Use today's date as the upper bound so we don't pick up future schedules
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             if not pm_type:
-                # BFM entered but no PM type yet - look up the full schedule entry
-                # to auto-fill PM type, technician, and due date
+                # BFM entered but no PM type yet - look up the most recent outstanding
+                # schedule entry to auto-fill PM type, technician, and due date
                 cursor.execute('''
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                      AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, current_week_start))
+                ''', (bfm_no, today_str))
 
                 schedule_result = cursor.fetchone()
                 cursor.close()
@@ -9602,15 +9600,15 @@ class AITCMMSSystem:
                         self.pm_due_date_var.set(sched_date)
                     self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
             else:
-                # Both BFM and PM type are set - look up specific schedule entry
+                # Both BFM and PM type are set - look up most recent outstanding schedule entry
                 cursor.execute('''
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                      AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type, today_str))
 
                 schedule_result = cursor.fetchone()
                 cursor.close()
@@ -14904,13 +14902,15 @@ class AITCMMSSystem:
                     }
 
             # Check 3: Weekly schedule updated if applicable
-            current_week_start = self.get_week_start(datetime.strptime(completion_date, '%Y-%m-%d'))
+            # Look for the most recently completed schedule entry (matches what the UPDATE targeted)
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
             cursor.execute('''
-                SELECT status FROM weekly_pm_schedules 
+                SELECT status FROM weekly_pm_schedules
                 WHERE bfm_equipment_no = %s AND pm_type = %s
-                AND assigned_technician = %s AND week_start_date = %s
-            ''', (bfm_no, pm_type, technician, current_week_start.strftime('%Y-%m-%d')))
-        
+                AND assigned_technician = %s AND week_start_date <= %s
+                ORDER BY week_start_date DESC LIMIT 1
+            ''', (bfm_no, pm_type, technician, today_str))
+
             schedule_status = cursor.fetchone()
             if schedule_status and schedule_status[0] != 'Completed':
                 return {
@@ -14995,11 +14995,8 @@ class AITCMMSSystem:
             if affected_rows != 1:
                 raise Exception(f"Equipment update failed - affected {affected_rows} rows instead of 1")
 
-            # Update weekly schedule status if exists
-            # Match by equipment and PM type only (any technician can complete any PM)
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            # Update the most recent outstanding schedule entry for this equipment + PM type
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
@@ -15011,12 +15008,12 @@ class AITCMMSSystem:
                 WHERE id = (
                     SELECT id FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s
-                    AND status = 'Scheduled' AND week_start_date = %s
-                    ORDER BY scheduled_date
+                    AND status = 'Scheduled' AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date
                     LIMIT 1
                 )
             ''', (completion_date, labor_hours + (labor_minutes/60), notes, technician,
-                bfm_no, pm_type, current_week_start))
+                bfm_no, pm_type, today_str))
 
             # DEBUG: Check if the update worked
             updated_rows = cursor.rowcount
@@ -15215,11 +15212,8 @@ class AITCMMSSystem:
             if affected_rows != 1:
                 raise Exception(f"Equipment status update failed - affected {affected_rows} rows")
 
-            # Update weekly schedule status to "Cannot Find"
-            # Match by equipment only (any technician can report any equipment as cannot find)
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            # Update the most recent outstanding schedule entry for this equipment
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
@@ -15230,11 +15224,11 @@ class AITCMMSSystem:
                 WHERE id = (
                     SELECT id FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s
-                    AND status = 'Scheduled' AND week_start_date = %s
-                    ORDER BY scheduled_date
+                    AND status = 'Scheduled' AND week_start_date <= %s
+                    ORDER BY week_start_date DESC, scheduled_date
                     LIMIT 1
                 )
-            ''', (completion_date, notes, technician, bfm_no, current_week_start))
+            ''', (completion_date, notes, technician, bfm_no, today_str))
 
             print(f"CHECK: Cannot Find PM processed: {bfm_no}")
             return True
