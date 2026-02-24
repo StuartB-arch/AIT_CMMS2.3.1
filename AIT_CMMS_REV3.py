@@ -11499,8 +11499,12 @@ class AITCMMSSystem:
         self.completion_bfm_var = tk.StringVar()
         bfm_combo = ttk.Combobox(form_frame, textvariable=self.completion_bfm_var, width=20)
         bfm_combo.grid(row=row, column=1, sticky='w', padx=5, pady=5)
-        # KeyRelease updates equipment suggestions AND triggers auto-populate
-        bfm_combo.bind('<KeyRelease>', lambda e: (self.update_equipment_suggestions(e), self.update_pm_completion_form_with_template()))
+        # KeyRelease updates equipment suggestions as user types
+        bfm_combo.bind('<KeyRelease>', self.update_equipment_suggestions)
+        # FocusOut triggers auto-populate when user finishes typing and leaves the field
+        bfm_combo.bind('<FocusOut>', lambda e: self.update_pm_completion_form_with_template())
+        # Return triggers auto-populate when user presses Enter
+        bfm_combo.bind('<Return>', lambda e: self.update_pm_completion_form_with_template())
         # ComboboxSelected triggers auto-populate when user picks from the dropdown
         bfm_combo.bind('<<ComboboxSelected>>', lambda e: self.update_pm_completion_form_with_template())
         self.bfm_combo = bfm_combo
