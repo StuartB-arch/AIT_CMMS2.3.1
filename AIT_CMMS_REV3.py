@@ -6663,12 +6663,13 @@ class AITCMMSSystem:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT checklist_items, special_instructions, safety_notes, estimated_hours
-                FROM pm_templates 
+                FROM pm_templates
                 WHERE bfm_equipment_no = %s AND pm_type = %s
                 ORDER BY updated_date DESC LIMIT 1
             ''', (bfm_no, pm_type))
-        
+
             result = cursor.fetchone()
+            cursor.close()
             if result:
                 checklist_json, special_instructions, safety_notes, estimated_hours = result
                 try:
@@ -6682,7 +6683,7 @@ class AITCMMSSystem:
                 except:
                     return None
             return None
-        
+
         except Exception as e:
             print(f"Error getting PM template: {e}")
             return None
@@ -6718,6 +6719,7 @@ class AITCMMSSystem:
                 ''', (bfm_no, current_week_start))
 
                 schedule_result = cursor.fetchone()
+                cursor.close()
                 if schedule_result:
                     sched_pm_type, sched_technician, sched_date = schedule_result
                     if sched_pm_type:
@@ -6740,6 +6742,7 @@ class AITCMMSSystem:
                 ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
+                cursor.close()
                 if schedule_result:
                     sched_technician, sched_date = schedule_result
                     if sched_technician:
@@ -9531,12 +9534,13 @@ class AITCMMSSystem:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT checklist_items, special_instructions, safety_notes, estimated_hours
-                FROM pm_templates 
+                FROM pm_templates
                 WHERE bfm_equipment_no = %s AND pm_type = %s
                 ORDER BY updated_date DESC LIMIT 1
             ''', (bfm_no, pm_type))
-        
+
             result = cursor.fetchone()
+            cursor.close()
             if result:
                 checklist_json, special_instructions, safety_notes, estimated_hours = result
                 try:
@@ -9550,7 +9554,7 @@ class AITCMMSSystem:
                 except:
                     return None
             return None
-        
+
         except Exception as e:
             print(f"Error getting PM template: {e}")
             return None
@@ -9586,6 +9590,7 @@ class AITCMMSSystem:
                 ''', (bfm_no, current_week_start))
 
                 schedule_result = cursor.fetchone()
+                cursor.close()
                 if schedule_result:
                     sched_pm_type, sched_technician, sched_date = schedule_result
                     if sched_pm_type:
@@ -9608,6 +9613,7 @@ class AITCMMSSystem:
                 ''', (bfm_no, pm_type, current_week_start))
 
                 schedule_result = cursor.fetchone()
+                cursor.close()
                 if schedule_result:
                     sched_technician, sched_date = schedule_result
                     if sched_technician:
@@ -14641,8 +14647,8 @@ class AITCMMSSystem:
 
                 if success:
                     # Commit transaction
-                    cursor.execute('COMMIT')
-                
+                    self.conn.commit()
+
                     # WARNING: VERIFY the completion was saved correctly
                     verification_result = self.verify_pm_completion_saved(cursor, bfm_no, pm_type, technician, completion_date)
                 
@@ -14655,6 +14661,7 @@ class AITCMMSSystem:
                                         f"Date: {completion_date}\n\n"
                                         f"CHECK: Database verification passed")
                     
+                        cursor.close()
                         # Clear form and refresh displays
                         self.clear_completion_form()
                         self.load_recent_completions()
@@ -14664,19 +14671,22 @@ class AITCMMSSystem:
                         if hasattr(self, 'auto_sync_after_action'):
                             self.auto_sync_after_action()
                     else:
-                        messagebox.showerror("WARNING: Warning", 
+                        cursor.close()
+                        messagebox.showerror("WARNING: Warning",
                                         f"PM was saved but verification failed!\n\n"
                                         f"{verification_result['message']}\n\n"
                                         f"Please check the PM History tab to confirm the completion was recorded.")
                         self.update_status(f"WARNING: PM saved but verification incomplete: {bfm_no}")
                 else:
                     # Rollback on failure
-                    cursor.execute('ROLLBACK')
+                    self.conn.rollback()
+                    cursor.close()
                     messagebox.showerror("Error", "Failed to process PM completion. Transaction rolled back.")
-                
+
             except Exception as e:
                 # Rollback on exception
-                cursor.execute('ROLLBACK')
+                self.conn.rollback()
+                cursor.close()
                 raise e
 
         except Exception as e:
@@ -16351,56 +16361,39 @@ class AITCMMSSystem:
         self.next_annual_pm_var.set('')
     
     def load_recent_completions(self):
-        """Load recent PM completions with debugging"""
-        print("DEBUG: load_recent_completions called")
-        
-        # ADD THIS SAFETY CHECK AT THE VERY BEGINNING:
+        """Load recent PM completions"""
         if not hasattr(self, 'recent_completions_tree'):
-            print("DEBUG: recent_completions_tree not yet created, skipping load")
             return
-        
-        
-        
+
         try:
             cursor = self.conn.cursor()
-            print("DEBUG: Database cursor created")
-        
+
             cursor.execute('''
-                SELECT completion_date, bfm_equipment_no, pm_type, technician_name, 
+                SELECT completion_date, bfm_equipment_no, pm_type, technician_name,
                     (labor_hours + labor_minutes/60.0) as total_hours
-                FROM pm_completions 
-                ORDER BY completion_date DESC, id DESC LIMIT 500
+                FROM pm_completions
+                ORDER BY completion_date DESC, id DESC LIMIT 100
             ''')
-        
+
             completions = cursor.fetchall()
-            print(f"DEBUG: Found {len(completions)} completions in database")
-        
+            cursor.close()
+
             # Clear existing items
             for item in self.recent_completions_tree.get_children():
                 self.recent_completions_tree.delete(item)
-            print("DEBUG: Cleared existing tree items")
-        
+
             # Add recent completions
-            for idx, completion in enumerate(completions):
+            for completion in completions:
                 completion_date, bfm_no, pm_type, technician, total_hours = completion
                 hours_display = f"{total_hours:.1f}h" if total_hours else "0.0h"
-
                 self.recent_completions_tree.insert('', 'end', values=(
                     completion_date, bfm_no, pm_type, technician, hours_display
                 ))
-                print(f"DEBUG: Added {bfm_no} - {pm_type} - {technician}")
 
-                # Yield to event loop every 50 items to keep UI responsive
-                if idx % 50 == 0:
-                    self.root.update_idletasks()
-        
-            print("DEBUG: Successfully loaded recent completions")
             print(f"Refreshed: {len(completions)} recent completions loaded")
-        
+
         except Exception as e:
             print(f"ERROR in load_recent_completions: {e}")
-            import traceback
-            traceback.print_exc()
     
     def generate_current_week_report(self):
         """Generate report for current week"""
