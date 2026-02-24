@@ -6701,9 +6701,9 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday)
+            # Calculate current week's start date (Monday) as a string to match TEXT column
             today = datetime.now().date()
-            current_week_start = today - timedelta(days=today.weekday())
+            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
 
             if not pm_type:
                 # BFM entered but no PM type yet - look up the full schedule entry
@@ -6749,6 +6749,7 @@ class AITCMMSSystem:
                     self.update_status(f"PM Due Date: {sched_date}")
         except Exception as e:
             print(f"Warning: Could not retrieve schedule data: {e}")
+            self.conn.rollback()
 
         # Auto-populate labor hours from template when both fields are set
         if bfm_no and pm_type:
@@ -9568,9 +9569,9 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday)
+            # Calculate current week's start date (Monday) as a string to match TEXT column
             today = datetime.now().date()
-            current_week_start = today - timedelta(days=today.weekday())
+            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
 
             if not pm_type:
                 # BFM entered but no PM type yet - look up the full schedule entry
@@ -9616,6 +9617,7 @@ class AITCMMSSystem:
                     self.update_status(f"PM Due Date: {sched_date}")
         except Exception as e:
             print(f"Warning: Could not retrieve schedule data: {e}")
+            self.conn.rollback()
 
         # Auto-populate labor hours from template when both fields are set
         if bfm_no and pm_type:
