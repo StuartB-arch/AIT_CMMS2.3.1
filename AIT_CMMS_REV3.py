@@ -14987,9 +14987,9 @@ class AITCMMSSystem:
 
             # Update weekly schedule status if exists
             # Match by equipment and PM type only (any technician can complete any PM)
-            # Calculate current week's start date (Monday)
+            # Calculate current week's start date (Monday) as a string to match TEXT column
             today = datetime.now().date()
-            current_week_start = today - timedelta(days=today.weekday())
+            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
 
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
@@ -15207,9 +15207,9 @@ class AITCMMSSystem:
 
             # Update weekly schedule status to "Cannot Find"
             # Match by equipment only (any technician can report any equipment as cannot find)
-            # Calculate current week's start date (Monday)
+            # Calculate current week's start date (Monday) as a string to match TEXT column
             today = datetime.now().date()
-            current_week_start = today - timedelta(days=today.weekday())
+            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
 
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
