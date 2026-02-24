@@ -9630,6 +9630,16 @@ class AITCMMSSystem:
                 self.labor_hours_var.set(str(int(template['estimated_hours'])))
                 self.labor_minutes_var.set(str(int((template['estimated_hours'] % 1) * 60)))
 
+    def on_bfm_changed(self):
+        """Called when the BFM field changes. Clears previously auto-populated
+        fields so each new BFM always gets a fresh full lookup."""
+        self.pm_type_var.set('')
+        self.completion_tech_var.set('')
+        self.pm_due_date_var.set('')
+        self.labor_hours_var.set('0')
+        self.labor_minutes_var.set('0')
+        self.update_pm_completion_form_with_template()
+
     def create_equipment_pm_lookup_with_templates(self):
         """Enhanced equipment lookup that shows custom templates"""
         dialog = tk.Toplevel(self.root)
@@ -11508,11 +11518,11 @@ class AITCMMSSystem:
         # KeyRelease updates equipment suggestions as user types
         bfm_combo.bind('<KeyRelease>', self.update_equipment_suggestions)
         # FocusOut triggers auto-populate when user finishes typing and leaves the field
-        bfm_combo.bind('<FocusOut>', lambda e: self.update_pm_completion_form_with_template())
+        bfm_combo.bind('<FocusOut>', lambda e: self.on_bfm_changed())
         # Return triggers auto-populate when user presses Enter
-        bfm_combo.bind('<Return>', lambda e: self.update_pm_completion_form_with_template())
+        bfm_combo.bind('<Return>', lambda e: self.on_bfm_changed())
         # ComboboxSelected triggers auto-populate when user picks from the dropdown
-        bfm_combo.bind('<<ComboboxSelected>>', lambda e: self.update_pm_completion_form_with_template())
+        bfm_combo.bind('<<ComboboxSelected>>', lambda e: self.on_bfm_changed())
         self.bfm_combo = bfm_combo
         row += 1
 
