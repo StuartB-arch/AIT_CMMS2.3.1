@@ -8,6 +8,7 @@ from mro_stock_module import MROStockManager
 from cm_parts_integration import CMPartsIntegration
 from manuals_module import ManualsManager
 from database_utils import db_pool, UserManager, AuditLogger, OptimisticConcurrencyControl, TransactionManager
+from skydrol_pm_task import SkydrolPMTaskManager
 from kpi_database_migration import migrate_kpi_database
 from kpi_manager import KPIManager
 from user_management_ui import UserManagementDialog
@@ -7161,6 +7162,13 @@ class AITCMMSSystem:
         self.manuals_manager = ManualsManager(self)
         self.parts_integration = CMPartsIntegration(self)
         self.init_pm_templates_database()
+
+        # Initialize Skydrol hydraulic-unit PM task – ensures equipment records
+        # and PM checklist templates exist in the database.
+        try:
+            SkydrolPMTaskManager(self.conn).setup()
+        except Exception as _skydrol_err:
+            print(f"WARNING [Skydrol]: Setup failed (non-fatal): {_skydrol_err}")
 
         # PERFORMANCE FIX: Defer KPI initialization for managers to after UI loads
         # This saves 10-20 seconds at startup
@@ -22254,24 +22262,45 @@ class AITCMMSSystem:
             result = pm_service.generate_weekly_schedule(week_start, weekly_target)
 
             if result['success']:
+                # ----------------------------------------------------------
+                # Inject weekly Skydrol hydraulic-unit PM tasks.
+                # These are always generated regardless of the normal PM count
+                # and are assigned to a randomly chosen available technician.
+                # ----------------------------------------------------------
+                skydrol_mgr = SkydrolPMTaskManager(self.conn)
+                skydrol_result = skydrol_mgr.generate_weekly_skydrol_pm(
+                    week_start, available_technicians
+                )
+                skydrol_added = skydrol_result.get('tasks_added', 0)
+                if not skydrol_result['success']:
+                    print(
+                        f"WARNING [Skydrol]: Could not schedule hydraulic PM tasks: "
+                        f"{skydrol_result.get('error', 'unknown error')}"
+                    )
+
                 # Check if there's a special message (like no equipment or no assignments)
                 if 'message' in result and result['total_assignments'] == 0:
                     messagebox.showinfo(
                         "Scheduling Complete",
                         f"{result['message']}\n\n"
-                        f"Week: {week_start}"
+                        f"Week: {week_start}\n\n"
+                        f"Skydrol hydraulic PM tasks added: {skydrol_added}"
                     )
                 else:
                     messagebox.showinfo(
                         "NEW SYSTEM - Scheduling Complete",
                         f"Generated {result['total_assignments']} PM assignments for week {week_start}\n\n"
                         f"Unique assets: {result['unique_assets']}\n\n"
+                        f"Skydrol hydraulic PM tasks added: {skydrol_added}\n\n"
                         f"This new system prevents duplicate assignments!"
                     )
 
                 # Refresh displays
                 self.refresh_technician_schedules()
-                self.update_status(f"NEW SYSTEM: Generated {result['total_assignments']} PM assignments")
+                self.update_status(
+                    f"NEW SYSTEM: Generated {result['total_assignments']} PM assignments "
+                    f"+ {skydrol_added} Skydrol hydraulic tasks"
+                )
             else:
                 messagebox.showerror("NEW SYSTEM Error", f"Failed to generate assignments: {result['error']}")
 
