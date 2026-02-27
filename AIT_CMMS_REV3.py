@@ -22264,8 +22264,9 @@ class AITCMMSSystem:
             if result['success']:
                 # ----------------------------------------------------------
                 # Inject weekly Skydrol hydraulic-unit PM tasks.
-                # These are always generated regardless of the normal PM count
-                # and are assigned to a randomly chosen available technician.
+                # Hydraulic units are excluded from the normal round-robin
+                # pool (weekly_pm=FALSE in equipment table).  This call
+                # inserts them with a fresh random technician each week.
                 # ----------------------------------------------------------
                 skydrol_mgr = SkydrolPMTaskManager(self.conn)
                 skydrol_result = skydrol_mgr.generate_weekly_skydrol_pm(
@@ -22273,9 +22274,17 @@ class AITCMMSSystem:
                 )
                 skydrol_added = skydrol_result.get('tasks_added', 0)
                 if not skydrol_result['success']:
+                    skydrol_err = skydrol_result.get('error', 'unknown error')
                     print(
-                        f"WARNING [Skydrol]: Could not schedule hydraulic PM tasks: "
-                        f"{skydrol_result.get('error', 'unknown error')}"
+                        f"WARNING [Skydrol]: Could not schedule hydraulic PM "
+                        f"tasks: {skydrol_err}"
+                    )
+                    messagebox.showwarning(
+                        "Skydrol PM Warning",
+                        f"Normal PMs were scheduled successfully.\n\n"
+                        f"However, the Skydrol hydraulic-unit PM tasks could "
+                        f"not be added this week:\n{skydrol_err}\n\n"
+                        f"Check the console for the full traceback."
                     )
 
                 # Check if there's a special message (like no equipment or no assignments)
@@ -22295,8 +22304,20 @@ class AITCMMSSystem:
                         f"This new system prevents duplicate assignments!"
                     )
 
-                # Refresh displays
-                self.refresh_technician_schedules()
+                # Refresh displays – wrapped in its own handler so a display
+                # error is reported clearly and does not hide the Skydrol error.
+                try:
+                    self.refresh_technician_schedules()
+                except Exception as refresh_err:
+                    import traceback as _tb
+                    _tb.print_exc()
+                    messagebox.showwarning(
+                        "Display Refresh Error",
+                        f"PMs were scheduled but the schedule display could not "
+                        f"be refreshed automatically:\n{refresh_err}\n\n"
+                        f"Please switch away from this tab and back to reload the view."
+                    )
+
                 self.update_status(
                     f"NEW SYSTEM: Generated {result['total_assignments']} PM assignments "
                     f"+ {skydrol_added} Skydrol hydraulic tasks"
