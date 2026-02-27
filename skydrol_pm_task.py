@@ -6,10 +6,15 @@ level inspection and top-off.
 
 Responsibilities
 ----------------
-* Ensure hydraulic unit equipment records exist in the CMMS equipment table.
+* Ensure hydraulic unit equipment records exist in the CMMS equipment table
+  (needed to satisfy the FK constraint on weekly_pm_schedules).
+  NOTE: weekly_pm is intentionally left FALSE so the normal PM scheduler
+  does NOT pick these units up in its round-robin pool.  All Skydrol-unit
+  scheduling is handled exclusively by generate_weekly_skydrol_pm().
 * Create / update the Skydrol-specific PM checklist template in pm_templates.
-* Inject a weekly PM entry into weekly_pm_schedules for every configured
-  hydraulic unit, each assigned to a *randomly* selected available technician.
+* For every configured hydraulic unit, delete any existing 'Scheduled' weekly
+  entry for the requested week and insert a fresh one assigned to a
+  *randomly* selected available technician.
 
 Designed to integrate cleanly with the existing AIT CMMS scheduling pipeline:
 
@@ -27,7 +32,7 @@ Designed to integrate cleanly with the existing AIT CMMS scheduling pipeline:
 
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List
 
 # ---------------------------------------------------------------------------
@@ -114,16 +119,28 @@ SKYDROL_SPECIAL_INSTRUCTIONS: str = (
 
 class SkydrolPMTaskManager:
     """
-    Manages weekly Skydrol fluid-level check PMs for all configured hydraulic units.
+    Manages weekly Skydrol fluid-level check PMs for all configured hydraulic
+    units.
+
+    IMPORTANT – scheduling ownership
+    ---------------------------------
+    Hydraulic unit equipment records are stored in the ``equipment`` table with
+    ALL pm-type flags set to FALSE (weekly_pm, monthly_pm, six_month_pm,
+    annual_pm).  This keeps them out of the normal PM scheduler's equipment
+    pool so they are never assigned via round-robin.  All scheduling for these
+    units is performed exclusively by ``generate_weekly_skydrol_pm()``, which
+    deletes any existing 'Scheduled' entry for the week and replaces it with a
+    freshly randomly-assigned technician on every run.
 
     Parameters
     ----------
     conn : psycopg2 connection
-        Active database connection (same object used by the main CMMS).
+        Active database connection (same ``self.conn`` object used by the
+        main CMMS application).
     """
 
     PM_TYPE: str = "Weekly"
-    ESTIMATED_HOURS: float = 0.5  # Approximately 30 minutes per unit
+    ESTIMATED_HOURS: float = 0.5  # ~30 minutes per unit
 
     def __init__(self, conn):
         self.conn = conn
@@ -134,9 +151,9 @@ class SkydrolPMTaskManager:
 
     def setup(self) -> None:
         """
-        One-time idempotent setup.
-        Ensures hydraulic unit equipment records and PM templates exist in the
-        database.  Safe to call on every application start-up.
+        Idempotent start-up routine.
+        Ensures equipment records and PM checklist templates exist.
+        Safe to call on every application launch.
         """
         self._ensure_hydraulic_units()
         self._ensure_pm_templates()
@@ -147,29 +164,27 @@ class SkydrolPMTaskManager:
         available_technicians: List[str],
     ) -> Dict:
         """
-        Insert Skydrol level-check PM tasks for each hydraulic unit into
-        ``weekly_pm_schedules`` for the given week.
+        Schedule Skydrol level-check PMs for every hydraulic unit.
 
-        Each unit is assigned to a **randomly** selected technician from
-        ``available_technicians``, independent of the technician chosen for any
-        other unit so that multiple technicians can share the workload.
+        For each unit the function:
+          1. Deletes any existing 'Scheduled' (not yet completed) entry for
+             the week so the assignment is always freshly randomised.
+          2. Inserts a new 'Scheduled' row with a randomly chosen technician.
 
-        The operation is idempotent: if a Skydrol PM for a given unit and week
-        already exists in the schedule it is left unchanged.
+        Already-completed rows (status != 'Scheduled') are left untouched.
 
         Parameters
         ----------
         week_start_str : str
             ISO-format week start date, e.g. ``"2025-03-10"`` (Monday).
         available_technicians : list[str]
-            Names of technicians eligible for assignment (already filtered for
-            any exclusions the user has applied in the UI).
+            Names eligible for random assignment.
 
         Returns
         -------
-        dict with keys:
+        dict
             ``success`` (bool), ``tasks_added`` (int),
-            ``assignments`` (list[dict]), ``error`` (str, on failure only)
+            ``assignments`` (list[dict]), ``error`` (str – on failure only)
         """
         if not available_technicians:
             return {
@@ -187,29 +202,29 @@ class SkydrolPMTaskManager:
             for unit in HYDRAULIC_UNITS:
                 bfm_no = unit["bfm_equipment_no"]
 
-                # Idempotency check – skip if already scheduled this week
+                # Remove any open (not yet completed) schedule for this unit /
+                # week so we always emit a fresh random assignment.
                 cursor.execute(
                     """
-                    SELECT COUNT(*) FROM weekly_pm_schedules
+                    DELETE FROM weekly_pm_schedules
                     WHERE week_start_date = %s
                       AND bfm_equipment_no = %s
-                      AND pm_type = %s
+                      AND pm_type          = %s
+                      AND status           = 'Scheduled'
                     """,
                     (week_start_str, bfm_no, self.PM_TYPE),
                 )
-                row = cursor.fetchone()
-                existing_count = row[0] if row else 0
-                if existing_count > 0:
+                deleted = cursor.rowcount
+                if deleted:
                     print(
-                        f"INFO [Skydrol]: {bfm_no} already scheduled for week "
-                        f"{week_start_str} – skipping."
+                        f"INFO [Skydrol]: Replaced existing open schedule for "
+                        f"{bfm_no} week {week_start_str}."
                     )
-                    continue
 
-                # Each unit gets its own independent random technician draw
+                # Randomly select an available technician for this unit.
                 technician = random.choice(available_technicians)
 
-                # Schedule on the Monday of the week (first day = most visibility)
+                # Always schedule on the Monday of the requested week.
                 scheduled_date = week_start_dt.strftime("%Y-%m-%d")
 
                 cursor.execute(
@@ -242,7 +257,7 @@ class SkydrolPMTaskManager:
 
                 print(
                     f"INFO [Skydrol]: Scheduled '{unit['description']}' "
-                    f"({bfm_no}) → {technician} for {scheduled_date}"
+                    f"({bfm_no}) \u2192 {technician} on {scheduled_date}"
                 )
 
             self.conn.commit()
@@ -254,9 +269,11 @@ class SkydrolPMTaskManager:
             }
 
         except Exception as exc:
-            self.conn.rollback()
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
             import traceback
-
             traceback.print_exc()
             return {
                 "success": False,
@@ -270,84 +287,74 @@ class SkydrolPMTaskManager:
     # ------------------------------------------------------------------
 
     def _ensure_hydraulic_units(self) -> None:
-        """Insert hydraulic unit equipment records that are missing, or update
-        the weekly_pm flag on existing records."""
+        """
+        Insert missing hydraulic unit equipment records.
+
+        All PM-type flags (weekly_pm, monthly_pm, six_month_pm, annual_pm)
+        are set to FALSE so the normal round-robin scheduler ignores these
+        units.  The records exist solely to satisfy the FK constraint on
+        weekly_pm_schedules and to supply description / location for the
+        schedule display.
+        """
         cursor = self.conn.cursor()
 
         for unit in HYDRAULIC_UNITS:
             bfm_no = unit["bfm_equipment_no"]
 
+            # Use UPSERT: insert if missing, or reset flags if already present
+            # so that any accidental weekly_pm=TRUE is corrected.
             cursor.execute(
-                "SELECT id FROM equipment WHERE bfm_equipment_no = %s",
-                (bfm_no,),
-            )
-            existing = cursor.fetchone()
-
-            if existing:
-                # Record exists – ensure weekly_pm flag is set and unit is active
-                cursor.execute(
-                    """
-                    UPDATE equipment
-                    SET weekly_pm = TRUE,
-                        status = 'Active',
+                """
+                INSERT INTO equipment
+                    (sap_material_no, bfm_equipment_no, description,
+                     tool_id_drawing_no, location,
+                     weekly_pm, monthly_pm, six_month_pm, annual_pm,
+                     status)
+                VALUES (%s, %s, %s, %s, %s,
+                        FALSE, FALSE, FALSE, FALSE,
+                        'Active')
+                ON CONFLICT (bfm_equipment_no) DO UPDATE
+                    SET weekly_pm    = FALSE,
+                        monthly_pm   = FALSE,
+                        six_month_pm = FALSE,
+                        annual_pm    = FALSE,
+                        status       = 'Active',
                         updated_date = CURRENT_TIMESTAMP
-                    WHERE bfm_equipment_no = %s
-                    """,
-                    (bfm_no,),
-                )
-                print(
-                    f"INFO [Skydrol]: Equipment {bfm_no} exists – ensured weekly_pm=TRUE."
-                )
-            else:
-                # Insert a new equipment record for this hydraulic unit
-                cursor.execute(
-                    """
-                    INSERT INTO equipment
-                        (sap_material_no, bfm_equipment_no, description,
-                         tool_id_drawing_no, location,
-                         weekly_pm, monthly_pm, six_month_pm, annual_pm,
-                         status)
-                    VALUES (%s, %s, %s, %s, %s,
-                            TRUE, FALSE, FALSE, FALSE,
-                            'Active')
-                    """,
-                    (
-                        unit["sap_material_no"],
-                        unit["bfm_equipment_no"],
-                        unit["description"],
-                        unit["tool_id_drawing_no"],
-                        unit["location"],
-                    ),
-                )
-                print(
-                    f"INFO [Skydrol]: Inserted new equipment record for {bfm_no} "
-                    f"({unit['description']})."
-                )
+                """,
+                (
+                    unit["sap_material_no"],
+                    unit["bfm_equipment_no"],
+                    unit["description"],
+                    unit["tool_id_drawing_no"],
+                    unit["location"],
+                ),
+            )
+            print(
+                f"INFO [Skydrol]: Equipment record upserted for {bfm_no} "
+                f"(weekly_pm=FALSE – managed by Skydrol module only)."
+            )
 
         self.conn.commit()
 
     def _ensure_pm_templates(self) -> None:
-        """Create or update the Skydrol PM checklist template for every
-        configured hydraulic unit."""
+        """Create or update the Skydrol PM checklist template for each unit."""
         cursor = self.conn.cursor()
 
-        # Guard: pm_templates table might not exist on very first start-up
-        # before init_pm_templates_database() runs.  Skip silently if so.
+        # Guard: pm_templates table may not exist on a brand-new installation.
         cursor.execute(
             """
             SELECT EXISTS (
                 SELECT FROM information_schema.tables
                 WHERE table_schema = 'public'
-                  AND table_name = 'pm_templates'
+                  AND table_name   = 'pm_templates'
             )
             """
         )
         row = cursor.fetchone()
-        table_exists = row[0] if row else False
-        if not table_exists:
+        if not (row and row[0]):
             print(
                 "INFO [Skydrol]: pm_templates table not yet created – "
-                "template setup will run on next startup."
+                "template will be created on next startup."
             )
             return
 
@@ -360,7 +367,7 @@ class SkydrolPMTaskManager:
 
         for unit in HYDRAULIC_UNITS:
             bfm_no = unit["bfm_equipment_no"]
-            template_name = f"Skydrol Level Check – {unit['description']}"
+            template_name = f"Skydrol Level Check - {unit['description']}"
 
             cursor.execute(
                 """
@@ -369,9 +376,9 @@ class SkydrolPMTaskManager:
                 """,
                 (bfm_no, self.PM_TYPE),
             )
-            existing_template = cursor.fetchone()
+            existing = cursor.fetchone()
 
-            if existing_template:
+            if existing:
                 cursor.execute(
                     """
                     UPDATE pm_templates
@@ -389,12 +396,10 @@ class SkydrolPMTaskManager:
                         SKYDROL_SPECIAL_INSTRUCTIONS,
                         SKYDROL_SAFETY_NOTES,
                         self.ESTIMATED_HOURS,
-                        existing_template[0],
+                        existing[0],
                     ),
                 )
-                print(
-                    f"INFO [Skydrol]: Updated PM template for {bfm_no}."
-                )
+                print(f"INFO [Skydrol]: Updated PM template for {bfm_no}.")
             else:
                 cursor.execute(
                     """
@@ -414,8 +419,6 @@ class SkydrolPMTaskManager:
                         self.ESTIMATED_HOURS,
                     ),
                 )
-                print(
-                    f"INFO [Skydrol]: Created PM template for {bfm_no}."
-                )
+                print(f"INFO [Skydrol]: Created PM template for {bfm_no}.")
 
         self.conn.commit()
