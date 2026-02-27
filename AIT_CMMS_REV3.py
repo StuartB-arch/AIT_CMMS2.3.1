@@ -22711,6 +22711,14 @@ class AITCMMSSystem:
                 if template_result and template_result[0]:
                     try:
                         checklist_items = json.loads(template_result[0])
+                        # Normalize: custom templates (e.g. Skydrol) store items as
+                        # {"step": N, "description": "..."} dicts.  The PDF renderer
+                        # calls .split() on each item, so flatten any dicts to strings.
+                        checklist_items = [
+                            item.get("description", str(item)) if isinstance(item, dict)
+                            else str(item)
+                            for item in checklist_items
+                        ]
                         estimated_hours = template_result[1] or 1.0
                         special_instructions = template_result[2]
                         safety_notes = template_result[3]
