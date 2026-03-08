@@ -147,6 +147,7 @@ class Equipment:
     last_annual_date: Optional[str]
     status: str
     priority: int = 99  # Default priority for assets not in priority lists
+    sap_no: str = ""    # SAP material number for group-based technician assignment
 
 @dataclass
 class CompletionRecord:
@@ -162,6 +163,8 @@ class PMAssignment:
     description: str
     priority_score: int
     reason: str
+    sap_no: str = ""            # SAP material number (assets with same SAP go to same tech)
+    equipment_priority: int = 99  # P1/P2/P3/P4 for group sorting
 
 class PMEligibilityResult(NamedTuple):
     status: PMStatus
@@ -775,7 +778,9 @@ class PMAssignmentGenerator:
                         PMType.WEEKLY,
                         equipment.description,
                         weekly_result.priority_score,
-                        weekly_result.reason
+                        weekly_result.reason,
+                        sap_no=equipment.sap_no,
+                        equipment_priority=equipment.priority
                     ))
                     equipment_assigned = True
                     rejection_counts['due'] += 1
@@ -813,7 +818,9 @@ class PMAssignmentGenerator:
                             PMType.MONTHLY,
                             equipment.description,
                             monthly_result.priority_score,
-                            monthly_result.reason
+                            monthly_result.reason,
+                            sap_no=equipment.sap_no,
+                            equipment_priority=equipment.priority
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
@@ -855,7 +862,9 @@ class PMAssignmentGenerator:
                             PMType.SIX_MONTH,
                             equipment.description,
                             six_month_result.priority_score,
-                            six_month_result.reason
+                            six_month_result.reason,
+                            sap_no=equipment.sap_no,
+                            equipment_priority=equipment.priority
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
@@ -901,7 +910,9 @@ class PMAssignmentGenerator:
                             PMType.ANNUAL,
                             equipment.description,
                             annual_result.priority_score,
-                            annual_result.reason
+                            annual_result.reason,
+                            sap_no=equipment.sap_no,
+                            equipment_priority=equipment.priority
                         ))
                         equipment_assigned = True
                         rejection_counts['due'] += 1
@@ -943,7 +954,10 @@ class PMAssignmentGenerator:
             )
         )
 
-        return potential_assignments[:max_assignments]
+        # Return all potential assignments (no hard slice here).
+        # The SAP-group assignment logic in _assign_and_save() handles the soft weekly target,
+        # ensuring complete SAP groups are always kept together.
+        return potential_assignments
 
 class PMSchedulingService:
     """Main orchestrator class"""
@@ -1127,8 +1141,8 @@ class PMSchedulingService:
                     'message': 'No PM assignments needed for this week.'
                 }
 
-            # Assign to technicians and save
-            scheduled_assignments = self._assign_and_save(assignments, week_start, week_start_str)
+            # Assign to technicians and save (group by SAP, soft cap at weekly_pm_target)
+            scheduled_assignments = self._assign_and_save(assignments, week_start, week_start_str, weekly_pm_target)
 
             self.conn.commit()
 
@@ -1156,7 +1170,7 @@ class PMSchedulingService:
         """Get list of active equipment from database - EXCLUDES Cannot Find, Run to Failure, Deactivated, and equipment with no PM schedules"""
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT bfm_equipment_no, description, weekly_pm, monthly_pm, six_month_pm, annual_pm,
+            SELECT bfm_equipment_no, sap_material_no, description, weekly_pm, monthly_pm, six_month_pm, annual_pm,
                 last_weekly_pm, last_monthly_pm, last_six_month_pm, last_annual_pm, COALESCE(status, 'Active') as status
             FROM equipment
             WHERE (status = 'Active' OR status IS NULL)
@@ -1182,28 +1196,34 @@ class PMSchedulingService:
 
             equipment_list.append(Equipment(
                 bfm_no=bfm_no,
-                description=row[1],
-                has_weekly=bool(row[2]) if row[2] is not None else False,
-                has_monthly=bool(row[3]) if row[3] is not None else False,
-                has_six_month=bool(row[4]) if row[4] is not None else False,
-                has_annual=bool(row[5]) if row[5] is not None else False,
-                last_weekly_date=row[6],
-                last_monthly_date=row[7],
-                last_six_month_date=row[8],
-                last_annual_date=row[9],
-                status=row[10],
+                sap_no=row[1] or "",
+                description=row[2],
+                has_weekly=bool(row[3]) if row[3] is not None else False,
+                has_monthly=bool(row[4]) if row[4] is not None else False,
+                has_six_month=bool(row[5]) if row[5] is not None else False,
+                has_annual=bool(row[6]) if row[6] is not None else False,
+                last_weekly_date=row[7],
+                last_monthly_date=row[8],
+                last_six_month_date=row[9],
+                last_annual_date=row[10],
+                status=row[11],
                 priority=priority
             ))
 
         return equipment_list
     
-    def _assign_and_save(self, assignments: List[PMAssignment], week_start: datetime, week_start_str: str):
-        """Assign to technicians and save to database - OPTIMIZED WITH BATCH INSERT"""
+    def _assign_and_save(self, assignments: List[PMAssignment], week_start: datetime,
+                         week_start_str: str, pm_target: int = 130):
+        """Assign to technicians and save to database using SAP-group-based assignment.
+
+        Assets sharing the same SAP material number are grouped together and assigned
+        to a single technician, rotating from the technician who handled the group last.
+        Complete groups are added until the total is at or beyond pm_target (soft cap).
+        """
 
         cursor = self.conn.cursor()
         scheduled_assignments = []
 
-        # Defensive check - should never happen due to validation in generate_weekly_schedule
         if not self.technicians or len(self.technicians) == 0:
             print("ERROR: No technicians available for assignment")
             return scheduled_assignments
@@ -1212,48 +1232,105 @@ class PMSchedulingService:
             print("INFO: No assignments to schedule")
             return scheduled_assignments
 
-        total_assignments = len(assignments)
-        print(f"DEBUG: Assigning {total_assignments} PMs to technicians...")
+        print(f"DEBUG: SAP-group assignment: {len(assignments)} candidate PMs, target ~{pm_target}...")
 
-        # Prepare batch data for database insert
+        # --- 1. Group assignments by SAP number ---
+        # Assets with no SAP number each form their own singleton group.
+        sap_groups: Dict[str, List[PMAssignment]] = {}
+        for assignment in assignments:  # already priority-sorted
+            sap_key = assignment.sap_no.strip() if assignment.sap_no and assignment.sap_no.strip() \
+                      else f"BFM:{assignment.bfm_no}"
+            if sap_key not in sap_groups:
+                sap_groups[sap_key] = []
+            sap_groups[sap_key].append(assignment)
+
+        print(f"DEBUG: Formed {len(sap_groups)} SAP groups from {len(assignments)} assignments")
+
+        # --- 2. Sort groups by priority ---
+        # Best (lowest) equipment priority level in the group, then best (highest) priority score.
+        def group_sort_key(sap_key: str):
+            group = sap_groups[sap_key]
+            best_eq_priority = min(a.equipment_priority for a in group)
+            best_score = max(a.priority_score for a in group)
+            return (best_eq_priority, -best_score)
+
+        sorted_keys = sorted(sap_groups.keys(), key=group_sort_key)
+
+        # --- 3. Preload most recent technician assignment per BFM (for rotation) ---
+        all_bfm_nos = list({a.bfm_no for a in assignments})
+        last_tech_per_bfm: Dict[str, str] = {}
+        if all_bfm_nos:
+            placeholders = ','.join(['%s'] * len(all_bfm_nos))
+            cursor.execute(f'''
+                SELECT DISTINCT ON (bfm_equipment_no)
+                    bfm_equipment_no, assigned_technician
+                FROM weekly_pm_schedules
+                WHERE bfm_equipment_no IN ({placeholders})
+                AND week_start_date < %s
+                AND assigned_technician IS NOT NULL
+                AND assigned_technician != ''
+                ORDER BY bfm_equipment_no, week_start_date DESC
+            ''', all_bfm_nos + [week_start_str])
+            last_tech_per_bfm = {row[0]: row[1] for row in cursor.fetchall()}
+
+        # --- 4. Assign each group to one technician and build insert batch ---
         batch_insert_data = []
+        fallback_tech_counter = 0  # for groups with no history
 
-        for i, assignment in enumerate(assignments):
-            # Yield to event loop every 100 assignments to prevent UI freeze
-            # (Increased from 25 due to batch insert optimization - much faster now)
-            if i > 0 and i % 100 == 0:
-                print(f"DEBUG: Progress: {i}/{total_assignments} assignments processed ({i*100//total_assignments}%)")
-                if self.root:
-                    self.root.update_idletasks()  # Yield to tkinter event loop
+        for sap_key in sorted_keys:
+            group = sap_groups[sap_key]
 
-            # Distribute among technicians
-            tech_index = i % len(self.technicians)
-            technician = self.technicians[tech_index]
+            # Determine last technician for this SAP group (most common across BFMs in group)
+            group_tech_history = [last_tech_per_bfm[b] for b in (a.bfm_no for a in group)
+                                  if b in last_tech_per_bfm]
 
-            # Schedule throughout the week
-            day_offset = i % 5  # Spread across weekdays
-            scheduled_date = week_start + timedelta(days=day_offset)
+            if group_tech_history:
+                # Pick the tech who appeared most recently (first in list since we sorted DESC)
+                last_tech = group_tech_history[0]
+                if last_tech in self.technicians:
+                    tech_idx = (self.technicians.index(last_tech) + 1) % len(self.technicians)
+                else:
+                    # Last tech no longer in active list — fall back to rotation
+                    tech_idx = fallback_tech_counter % len(self.technicians)
+            else:
+                # No history for any BFM in this group
+                tech_idx = fallback_tech_counter % len(self.technicians)
 
-            # Add to batch insert data
-            batch_insert_data.append((
-                week_start_str,
-                assignment.bfm_no,
-                assignment.pm_type.value,
-                technician,
-                scheduled_date.strftime('%Y-%m-%d')
-            ))
+            fallback_tech_counter += 1
+            technician = self.technicians[tech_idx]
 
-            scheduled_assignments.append({
-                'bfm_no': assignment.bfm_no,
-                'pm_type': assignment.pm_type.value,
-                'description': assignment.description,
-                'technician': technician,
-                'scheduled_date': scheduled_date,
-                'reason': assignment.reason,
-                'priority_score': assignment.priority_score
-            })
+            # Spread assets within the group across weekdays
+            for asset_idx, assignment in enumerate(group):
+                day_offset = asset_idx % 5
+                scheduled_date = week_start + timedelta(days=day_offset)
 
-        # PERFORMANCE OPTIMIZATION: Batch insert all assignments at once
+                batch_insert_data.append((
+                    week_start_str,
+                    assignment.bfm_no,
+                    assignment.pm_type.value,
+                    technician,
+                    scheduled_date.strftime('%Y-%m-%d')
+                ))
+
+                scheduled_assignments.append({
+                    'bfm_no': assignment.bfm_no,
+                    'pm_type': assignment.pm_type.value,
+                    'description': assignment.description,
+                    'technician': technician,
+                    'scheduled_date': scheduled_date,
+                    'reason': assignment.reason,
+                    'priority_score': assignment.priority_score
+                })
+
+            # Stop adding groups once we've met or exceeded the weekly target.
+            # We always include the full current group first (never split a group).
+            if len(scheduled_assignments) >= pm_target:
+                remaining = len(assignments) - len(scheduled_assignments)
+                print(f"DEBUG: Reached target ({len(scheduled_assignments)} PMs scheduled, "
+                      f"~{remaining} lower-priority PMs deferred to future weeks)")
+                break
+
+        # Batch insert all assignments at once
         print(f"DEBUG: Saving {len(batch_insert_data)} assignments to database (batch insert)...")
         cursor.executemany('''
             INSERT INTO weekly_pm_schedules
@@ -1261,7 +1338,8 @@ class PMSchedulingService:
             VALUES (%s, %s, %s, %s, %s)
         ''', batch_insert_data)
 
-        print(f"DEBUG: Finished assigning all {total_assignments} PMs")
+        print(f"DEBUG: Finished assigning {len(scheduled_assignments)} PMs across "
+              f"{len(set(r['technician'] for r in scheduled_assignments))} technicians")
         return scheduled_assignments
 
 
