@@ -10355,6 +10355,18 @@ class AITCMMSSystem:
                     ALTER TABLE weekly_pm_schedules
                     ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Scheduled'
                 ''')
+                cursor.execute('''
+                    ALTER TABLE weekly_pm_schedules
+                    ADD COLUMN IF NOT EXISTS completion_date TEXT
+                ''')
+                cursor.execute('''
+                    ALTER TABLE weekly_pm_schedules
+                    ADD COLUMN IF NOT EXISTS labor_hours REAL
+                ''')
+                cursor.execute('''
+                    ALTER TABLE weekly_pm_schedules
+                    ADD COLUMN IF NOT EXISTS notes TEXT
+                ''')
                 # Migrate old schedule_type data to pm_type if needed
                 cursor.execute('''
                     UPDATE weekly_pm_schedules
@@ -15225,27 +15237,63 @@ class AITCMMSSystem:
             if affected_rows != 1:
                 raise Exception(f"Equipment update failed - affected {affected_rows} rows instead of 1")
 
-            # Update weekly schedule status — match the scheduled entry closest to the due date
-            # (no week_start_date restriction so Monthly/Six Month/Annual entries are found too)
+            # Update weekly schedule status — wrapped in a SAVEPOINT so a failure here
+            # does NOT abort the transaction and lose the pm_completions INSERT.
             ref_date = pm_due_date if pm_due_date else completion_date
-            cursor.execute('''
-                UPDATE weekly_pm_schedules SET
-                status = 'Completed',
-                completion_date = %s,
-                labor_hours = %s,
-                notes = %s,
-                assigned_technician = %s
-                WHERE id = (
-                    SELECT id FROM weekly_pm_schedules
-                    WHERE bfm_equipment_no = %s AND pm_type = %s
-                    AND status = 'Scheduled'
-                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
-                    LIMIT 1
-                )
-            ''', (completion_date, labor_hours + (labor_minutes / 60), notes, technician,
-                  bfm_no, pm_type, ref_date))
+            sched_hours = labor_hours + (labor_minutes / 60)
+            updated_rows = 0
+            cursor.execute("SAVEPOINT before_sched_update")
+            try:
+                # Primary: closest scheduled entry by date
+                cursor.execute('''
+                    UPDATE weekly_pm_schedules SET
+                    status = 'Completed',
+                    completion_date = %s,
+                    labor_hours = %s,
+                    notes = %s,
+                    assigned_technician = %s
+                    WHERE id = (
+                        SELECT id FROM weekly_pm_schedules
+                        WHERE bfm_equipment_no = %s AND pm_type = %s
+                        AND status = 'Scheduled'
+                        ORDER BY ABS(scheduled_date::date - %s::date) ASC
+                        LIMIT 1
+                    )
+                ''', (completion_date, sched_hours, notes, technician,
+                      bfm_no, pm_type, ref_date))
+                updated_rows = cursor.rowcount
+                cursor.execute("RELEASE SAVEPOINT before_sched_update")
+            except Exception as sched_e:
+                print(f"WARNING: Schedule date-order update failed ({sched_e}), trying fallback")
+                cursor.execute("ROLLBACK TO SAVEPOINT before_sched_update")
+                cursor.execute("RELEASE SAVEPOINT before_sched_update")
 
-            updated_rows = cursor.rowcount
+            # Fallback: no date ordering (handles NULL/non-castable scheduled_date values)
+            if updated_rows == 0:
+                cursor.execute("SAVEPOINT before_sched_fallback")
+                try:
+                    cursor.execute('''
+                        UPDATE weekly_pm_schedules SET
+                        status = 'Completed',
+                        completion_date = %s,
+                        labor_hours = %s,
+                        notes = %s,
+                        assigned_technician = %s
+                        WHERE id = (
+                            SELECT id FROM weekly_pm_schedules
+                            WHERE bfm_equipment_no = %s AND pm_type = %s
+                            AND status = 'Scheduled'
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                    ''', (completion_date, sched_hours, notes, technician, bfm_no, pm_type))
+                    updated_rows = cursor.rowcount
+                    cursor.execute("RELEASE SAVEPOINT before_sched_fallback")
+                except Exception as sched_e2:
+                    print(f"WARNING: Schedule fallback update failed ({sched_e2}), skipping")
+                    cursor.execute("ROLLBACK TO SAVEPOINT before_sched_fallback")
+                    cursor.execute("RELEASE SAVEPOINT before_sched_fallback")
+
             print(f"DEBUG: Updated {updated_rows} weekly schedule rows for {bfm_no} - {pm_type} by {technician}")
 
             print(f"CHECK: Normal PM completion processed successfully: {bfm_no} - {pm_type}")
