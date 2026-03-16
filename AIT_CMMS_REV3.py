@@ -6793,7 +6793,7 @@ class AITCMMSSystem:
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
+                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
                     LIMIT 1
                 ''', (bfm_no, today_str))
 
@@ -6857,7 +6857,7 @@ class AITCMMSSystem:
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
+                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
                     LIMIT 1
                 ''', (bfm_no, pm_type, today_str))
 
@@ -9737,7 +9737,7 @@ class AITCMMSSystem:
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
+                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
                     LIMIT 1
                 ''', (bfm_no, today_str))
 
@@ -9801,7 +9801,7 @@ class AITCMMSSystem:
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
+                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
                     LIMIT 1
                 ''', (bfm_no, pm_type, today_str))
 
