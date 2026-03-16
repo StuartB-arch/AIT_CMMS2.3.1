@@ -2225,7 +2225,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
     
     
     
-        # 2. PM TYPE BREAKDOWN (PM Completions only)
+        # 2. PM TYPE BREAKDOWN (PM Completions only - excludes Cannot Find / Run to Failure)
         cursor.execute('''
             SELECT
                 pm_type,
@@ -2235,6 +2235,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             FROM pm_completions
             WHERE EXTRACT(YEAR FROM completion_date::date) = %s
             AND EXTRACT(MONTH FROM completion_date::date) = %s
+            AND pm_type NOT IN ('CANNOT FIND', 'Cannot Find', 'Run to Failure', 'RTF')
             GROUP BY pm_type
             ORDER BY count DESC
         ''', (year, month))
@@ -2253,7 +2254,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
                 print(f"{pm_type_str:<15} {count_val:<10} {total_hrs_display:<15} {avg_hrs_display:<12}")
             print()
     
-        # 3. DAILY COMPLETION TRACKING (PM Completions only)
+        # 3. DAILY COMPLETION TRACKING (PM Completions only - excludes Cannot Find / Run to Failure)
         cursor.execute('''
             SELECT
                 completion_date,
@@ -2262,6 +2263,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             FROM pm_completions
             WHERE EXTRACT(YEAR FROM completion_date::date) = %s
             AND EXTRACT(MONTH FROM completion_date::date) = %s
+            AND pm_type NOT IN ('CANNOT FIND', 'Cannot Find', 'Run to Failure', 'RTF')
             GROUP BY completion_date
             ORDER BY completion_date
         ''', (year, month))
@@ -2282,7 +2284,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
                 print(f"{date_str:<12} {count_val:<15} {hours_display:<12} {running_total:<15}")
             print()
     
-        # 4. TECHNICIAN PERFORMANCE (PM Completions only)
+        # 4. TECHNICIAN PERFORMANCE (PM Completions only - excludes Cannot Find / Run to Failure)
         # Get completions per technician
         cursor.execute('''
             SELECT
@@ -2293,6 +2295,7 @@ def generate_monthly_summary_report(conn, month=None, year=None):
             FROM pm_completions
             WHERE EXTRACT(YEAR FROM completion_date::date) = %s
             AND EXTRACT(MONTH FROM completion_date::date) = %s
+            AND pm_type NOT IN ('CANNOT FIND', 'Cannot Find', 'Run to Failure', 'RTF')
             GROUP BY technician_name
             ORDER BY completions DESC
         ''', (year, month))
@@ -15171,38 +15174,47 @@ class AITCMMSSystem:
                 raise Exception("Failed to get completion record ID")
 
             # Update equipment PM dates
-            if pm_type == 'Monthly':
-                if next_annual_pm: 
+            if pm_type == 'Weekly':
+                cursor.execute('''
+                    UPDATE equipment SET
+                    last_weekly_pm = %s,
+                    next_weekly_pm = %s::date + INTERVAL '7 days',
+                    updated_date = CURRENT_TIMESTAMP
+                    WHERE bfm_equipment_no = %s
+                ''', (completion_date, completion_date, bfm_no))
+
+            elif pm_type == 'Monthly':
+                if next_annual_pm:
                     cursor.execute('''
-                        UPDATE equipment SET 
-                        last_monthly_pm = %s, 
+                        UPDATE equipment SET
+                        last_monthly_pm = %s,
                         next_monthly_pm = %s::date + INTERVAL '30 days',
-                        next_annual_pm = %s,  
+                        next_annual_pm = %s,
                         updated_date = CURRENT_TIMESTAMP
                         WHERE bfm_equipment_no = %s
                     ''', (completion_date, completion_date, next_annual_pm, bfm_no))
                 else:
                     cursor.execute('''
-                        UPDATE equipment SET 
-                        last_monthly_pm = %s, 
+                        UPDATE equipment SET
+                        last_monthly_pm = %s,
                         next_monthly_pm = %s::date + INTERVAL '30 days',
                         updated_date = CURRENT_TIMESTAMP
                         WHERE bfm_equipment_no = %s
                     ''', (completion_date, completion_date, bfm_no))
-                    
+
             elif pm_type == 'Six Month':
                 cursor.execute('''
-                    UPDATE equipment SET 
-                    last_six_month_pm = %s, 
+                    UPDATE equipment SET
+                    last_six_month_pm = %s,
                     next_six_month_pm = %s::date + INTERVAL '180 days',
                     updated_date = CURRENT_TIMESTAMP
                     WHERE bfm_equipment_no = %s
                 ''', (completion_date, completion_date, bfm_no))
-                
+
             elif pm_type == 'Annual':
                 cursor.execute('''
-                    UPDATE equipment SET 
-                    last_annual_pm = %s, 
+                    UPDATE equipment SET
+                    last_annual_pm = %s,
                     next_annual_pm = %s::date + INTERVAL '365 days',
                     updated_date = CURRENT_TIMESTAMP
                     WHERE bfm_equipment_no = %s
@@ -15213,12 +15225,9 @@ class AITCMMSSystem:
             if affected_rows != 1:
                 raise Exception(f"Equipment update failed - affected {affected_rows} rows instead of 1")
 
-            # Update weekly schedule status if exists
-            # Match by equipment and PM type only (any technician can complete any PM)
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
-
+            # Update weekly schedule status — match the scheduled entry closest to the due date
+            # (no week_start_date restriction so Monthly/Six Month/Annual entries are found too)
+            ref_date = pm_due_date if pm_due_date else completion_date
             cursor.execute('''
                 UPDATE weekly_pm_schedules SET
                 status = 'Completed',
@@ -15229,14 +15238,13 @@ class AITCMMSSystem:
                 WHERE id = (
                     SELECT id FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s
-                    AND status = 'Scheduled' AND week_start_date = %s
-                    ORDER BY scheduled_date
+                    AND status = 'Scheduled'
+                    ORDER BY ABS(scheduled_date::date - %s::date) ASC
                     LIMIT 1
                 )
-            ''', (completion_date, labor_hours + (labor_minutes/60), notes, technician,
-                bfm_no, pm_type, current_week_start))
+            ''', (completion_date, labor_hours + (labor_minutes / 60), notes, technician,
+                  bfm_no, pm_type, ref_date))
 
-            # DEBUG: Check if the update worked
             updated_rows = cursor.rowcount
             print(f"DEBUG: Updated {updated_rows} weekly schedule rows for {bfm_no} - {pm_type} by {technician}")
 
