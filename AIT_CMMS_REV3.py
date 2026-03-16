@@ -6770,8 +6770,10 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected.
 
-        Auto-populates technician, PM type, due date, and labor hours from
-        the weekly schedule when a BFM number is entered.
+        Auto-populates cycle (PM type), technician, due date, and labor hours.
+        First tries the weekly_pm_schedules table for any upcoming/recent entry
+        (not limited to the current week), then falls back to the equipment table
+        so that Monthly, Six Month, and Annual PMs always populate correctly.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
@@ -6781,24 +6783,22 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             if not pm_type:
-                # BFM entered but no PM type yet - look up the full schedule entry
-                # to auto-fill PM type, technician, and due date
+                # BFM entered but no PM type yet.
+                # Look for the closest upcoming (or most recently scheduled) entry
+                # across ALL weeks so Monthly/Six Month/Annual PMs are found too.
                 cursor.execute('''
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
                     LIMIT 1
-                ''', (bfm_no, current_week_start))
+                ''', (bfm_no, today_str))
 
                 schedule_result = cursor.fetchone()
-                cursor.close()
+
                 if schedule_result:
                     sched_pm_type, sched_technician, sched_date = schedule_result
                     if sched_pm_type:
@@ -6808,20 +6808,61 @@ class AITCMMSSystem:
                         self.completion_tech_var.set(sched_technician)
                     if sched_date:
                         self.pm_due_date_var.set(sched_date)
-                    self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
+                    self.update_status(
+                        f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}"
+                    )
+                else:
+                    # Fallback: read PM cycles and next due dates directly from equipment table
+                    cursor.execute('''
+                        SELECT weekly_pm, monthly_pm, six_month_pm, annual_pm,
+                               next_weekly_pm, next_monthly_pm, next_six_month_pm, next_annual_pm
+                        FROM equipment
+                        WHERE bfm_equipment_no = %s
+                    ''', (bfm_no,))
+                    eq_row = cursor.fetchone()
+                    if eq_row:
+                        (is_weekly, is_monthly, is_six_month, is_annual,
+                         next_weekly, next_monthly, next_six_month, next_annual) = eq_row
+
+                        # Build a list of enabled (pm_type, next_due_date) pairs
+                        enabled = []
+                        if is_weekly and next_weekly:
+                            enabled.append(('Weekly', next_weekly))
+                        if is_monthly and next_monthly:
+                            enabled.append(('Monthly', next_monthly))
+                        if is_six_month and next_six_month:
+                            enabled.append(('Six Month', next_six_month))
+                        if is_annual and next_annual:
+                            enabled.append(('Annual', next_annual))
+
+                        if enabled:
+                            # Pick the PM type whose due date is closest to today
+                            def days_away(due):
+                                try:
+                                    d = datetime.strptime(due, '%Y-%m-%d').date()
+                                    return abs((d - datetime.now().date()).days)
+                                except Exception:
+                                    return 9999
+
+                            best_type, best_due = min(enabled, key=lambda x: days_away(x[1]))
+                            self.pm_type_var.set(best_type)
+                            pm_type = best_type
+                            self.pm_due_date_var.set(best_due)
+                            self.update_status(
+                                f"Auto-filled from equipment record: {best_type} PM due {best_due}"
+                            )
             else:
-                # Both BFM and PM type are set - look up specific schedule entry
+                # Both BFM and PM type are set — look for any matching scheduled entry
                 cursor.execute('''
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type, today_str))
 
                 schedule_result = cursor.fetchone()
-                cursor.close()
+
                 if schedule_result:
                     sched_technician, sched_date = schedule_result
                     if sched_technician:
@@ -6829,9 +6870,34 @@ class AITCMMSSystem:
                     if sched_date:
                         self.pm_due_date_var.set(sched_date)
                     self.update_status(f"PM Due Date: {sched_date}")
+                else:
+                    # Fallback: pull due date for this PM type from equipment table
+                    type_to_col = {
+                        'Weekly':    'next_weekly_pm',
+                        'Monthly':   'next_monthly_pm',
+                        'Six Month': 'next_six_month_pm',
+                        'Annual':    'next_annual_pm',
+                    }
+                    col = type_to_col.get(pm_type)
+                    if col:
+                        cursor.execute(
+                            f'SELECT {col} FROM equipment WHERE bfm_equipment_no = %s',
+                            (bfm_no,)
+                        )
+                        eq_row = cursor.fetchone()
+                        if eq_row and eq_row[0]:
+                            self.pm_due_date_var.set(eq_row[0])
+                            self.update_status(
+                                f"Due date auto-filled from equipment record: {eq_row[0]}"
+                            )
+
+            cursor.close()
         except Exception as e:
             print(f"Warning: Could not retrieve schedule data: {e}")
-            self.conn.rollback()
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
 
         # Auto-populate labor hours from template when both fields are set
         if bfm_no and pm_type:
@@ -9648,8 +9714,10 @@ class AITCMMSSystem:
     def update_pm_completion_form_with_template(self):
         """Update PM completion form when equipment is selected.
 
-        Auto-populates technician, PM type, due date, and labor hours from
-        the weekly schedule when a BFM number is entered.
+        Auto-populates cycle (PM type), technician, due date, and labor hours.
+        First tries the weekly_pm_schedules table for any upcoming/recent entry
+        (not limited to the current week), then falls back to the equipment table
+        so that Monthly, Six Month, and Annual PMs always populate correctly.
         """
         bfm_no = self.completion_bfm_var.get().strip()
         pm_type = self.pm_type_var.get()
@@ -9659,24 +9727,22 @@ class AITCMMSSystem:
 
         try:
             cursor = self.conn.cursor()
-            # Calculate current week's start date (Monday) as a string to match TEXT column
-            today = datetime.now().date()
-            current_week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d')
+            today_str = datetime.now().date().strftime('%Y-%m-%d')
 
             if not pm_type:
-                # BFM entered but no PM type yet - look up the full schedule entry
-                # to auto-fill PM type, technician, and due date
+                # BFM entered but no PM type yet.
+                # Look for the closest upcoming (or most recently scheduled) entry
+                # across ALL weeks so Monthly/Six Month/Annual PMs are found too.
                 cursor.execute('''
                     SELECT pm_type, assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
                     LIMIT 1
-                ''', (bfm_no, current_week_start))
+                ''', (bfm_no, today_str))
 
                 schedule_result = cursor.fetchone()
-                cursor.close()
+
                 if schedule_result:
                     sched_pm_type, sched_technician, sched_date = schedule_result
                     if sched_pm_type:
@@ -9686,20 +9752,61 @@ class AITCMMSSystem:
                         self.completion_tech_var.set(sched_technician)
                     if sched_date:
                         self.pm_due_date_var.set(sched_date)
-                    self.update_status(f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}")
+                    self.update_status(
+                        f"Auto-filled from schedule: {sched_pm_type} PM assigned to {sched_technician}"
+                    )
+                else:
+                    # Fallback: read PM cycles and next due dates directly from equipment table
+                    cursor.execute('''
+                        SELECT weekly_pm, monthly_pm, six_month_pm, annual_pm,
+                               next_weekly_pm, next_monthly_pm, next_six_month_pm, next_annual_pm
+                        FROM equipment
+                        WHERE bfm_equipment_no = %s
+                    ''', (bfm_no,))
+                    eq_row = cursor.fetchone()
+                    if eq_row:
+                        (is_weekly, is_monthly, is_six_month, is_annual,
+                         next_weekly, next_monthly, next_six_month, next_annual) = eq_row
+
+                        # Build a list of enabled (pm_type, next_due_date) pairs
+                        enabled = []
+                        if is_weekly and next_weekly:
+                            enabled.append(('Weekly', next_weekly))
+                        if is_monthly and next_monthly:
+                            enabled.append(('Monthly', next_monthly))
+                        if is_six_month and next_six_month:
+                            enabled.append(('Six Month', next_six_month))
+                        if is_annual and next_annual:
+                            enabled.append(('Annual', next_annual))
+
+                        if enabled:
+                            # Pick the PM type whose due date is closest to today
+                            def days_away(due):
+                                try:
+                                    d = datetime.strptime(due, '%Y-%m-%d').date()
+                                    return abs((d - datetime.now().date()).days)
+                                except Exception:
+                                    return 9999
+
+                            best_type, best_due = min(enabled, key=lambda x: days_away(x[1]))
+                            self.pm_type_var.set(best_type)
+                            pm_type = best_type
+                            self.pm_due_date_var.set(best_due)
+                            self.update_status(
+                                f"Auto-filled from equipment record: {best_type} PM due {best_due}"
+                            )
             else:
-                # Both BFM and PM type are set - look up specific schedule entry
+                # Both BFM and PM type are set — look for any matching scheduled entry
                 cursor.execute('''
                     SELECT assigned_technician, scheduled_date
                     FROM weekly_pm_schedules
                     WHERE bfm_equipment_no = %s AND pm_type = %s AND status = 'Scheduled'
-                      AND week_start_date = %s
-                    ORDER BY scheduled_date ASC
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date::date - %s::date))) ASC
                     LIMIT 1
-                ''', (bfm_no, pm_type, current_week_start))
+                ''', (bfm_no, pm_type, today_str))
 
                 schedule_result = cursor.fetchone()
-                cursor.close()
+
                 if schedule_result:
                     sched_technician, sched_date = schedule_result
                     if sched_technician:
@@ -9707,9 +9814,34 @@ class AITCMMSSystem:
                     if sched_date:
                         self.pm_due_date_var.set(sched_date)
                     self.update_status(f"PM Due Date: {sched_date}")
+                else:
+                    # Fallback: pull due date for this PM type from equipment table
+                    type_to_col = {
+                        'Weekly':    'next_weekly_pm',
+                        'Monthly':   'next_monthly_pm',
+                        'Six Month': 'next_six_month_pm',
+                        'Annual':    'next_annual_pm',
+                    }
+                    col = type_to_col.get(pm_type)
+                    if col:
+                        cursor.execute(
+                            f'SELECT {col} FROM equipment WHERE bfm_equipment_no = %s',
+                            (bfm_no,)
+                        )
+                        eq_row = cursor.fetchone()
+                        if eq_row and eq_row[0]:
+                            self.pm_due_date_var.set(eq_row[0])
+                            self.update_status(
+                                f"Due date auto-filled from equipment record: {eq_row[0]}"
+                            )
+
+            cursor.close()
         except Exception as e:
             print(f"Warning: Could not retrieve schedule data: {e}")
-            self.conn.rollback()
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
 
         # Auto-populate labor hours from template when both fields are set
         if bfm_no and pm_type:
