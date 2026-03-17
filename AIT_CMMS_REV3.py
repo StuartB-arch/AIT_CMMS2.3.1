@@ -11688,6 +11688,13 @@ class AITCMMSSystem:
         button_frame.pack(fill='x', pady=5)
         ttk.Button(button_frame, text="Clear All Exclusions", command=self.clear_all_exclusions).pack(side='left', padx=5)
 
+        # Weekly PM count summary
+        self.schedule_summary_var = tk.StringVar(value="Total Assigned PMs: —")
+        summary_frame = ttk.Frame(self.pm_schedule_frame)
+        summary_frame.pack(fill='x', padx=10, pady=(0, 2))
+        ttk.Label(summary_frame, textvariable=self.schedule_summary_var,
+                  font=('TkDefaultFont', 10, 'bold')).pack(side='left', padx=5)
+
         # Schedule display
         schedule_frame = ttk.LabelFrame(self.pm_schedule_frame, text="Weekly PM Schedule", padding=10)
         schedule_frame.pack(fill='both', expand=True, padx=10, pady=5)
@@ -22641,6 +22648,20 @@ class AITCMMSSystem:
         ''', (week_start,))
 
         all_assignments = cursor.fetchall()
+
+        # Tally counts for the summary label
+        total = len(all_assignments)
+        scheduled_count = sum(1 for a in all_assignments if a[4] == 'Scheduled')
+        completed_count = sum(1 for a in all_assignments if a[4] == 'Completed')
+        other_count = total - scheduled_count - completed_count
+
+        if hasattr(self, 'schedule_summary_var'):
+            parts = [f"Total Assigned PMs: {total}",
+                     f"Scheduled: {scheduled_count}",
+                     f"Completed: {completed_count}"]
+            if other_count:
+                parts.append(f"Other: {other_count}")
+            self.schedule_summary_var.set("   |   ".join(parts))
 
         # Group assignments by technician and populate trees
         for idx, assignment in enumerate(all_assignments):
