@@ -22649,26 +22649,47 @@ class AITCMMSSystem:
 
         all_assignments = cursor.fetchall()
 
-        # Accurate counts from a direct query (avoids JOIN duplicates inflating totals)
-        cursor.execute('''
-            SELECT
-                COUNT(*) AS total,
-                COUNT(CASE WHEN status = 'Scheduled' THEN 1 END) AS scheduled,
-                COUNT(CASE WHEN status = 'Completed' THEN 1 END) AS completed,
-                COUNT(CASE WHEN status NOT IN ('Scheduled', 'Completed') THEN 1 END) AS other
-            FROM weekly_pm_schedules
-            WHERE week_start_date = %s
-        ''', (week_start,))
-        counts = cursor.fetchone()
-        total, scheduled_count, completed_count, other_count = counts if counts else (0, 0, 0, 0)
-
+        # Build accurate summary counts:
+        #   Total      — rows in weekly_pm_schedules for this week (ground truth for what was scheduled)
+        #   Completed  — rows in pm_completions whose completion_date falls within the week
+        #                (pm_completions is authoritative; weekly_pm_schedules.status is stale for
+        #                 weeks where the status-update bug was in effect)
+        #   Remaining  — total scheduled minus completions recorded
+        #   Cannot Find — entries explicitly marked Cannot Find in the schedule
         if hasattr(self, 'schedule_summary_var'):
-            parts = [f"Total Assigned PMs: {total}",
-                     f"Scheduled: {scheduled_count}",
-                     f"Completed: {completed_count}"]
-            if other_count:
-                parts.append(f"Other: {other_count}")
-            self.schedule_summary_var.set("   |   ".join(parts))
+            try:
+                from datetime import datetime, timedelta
+                week_dt = datetime.strptime(week_start, '%Y-%m-%d')
+                week_end = (week_dt + timedelta(days=6)).strftime('%Y-%m-%d')
+
+                cursor.execute(
+                    "SELECT COUNT(*) FROM weekly_pm_schedules WHERE week_start_date = %s",
+                    (week_start,))
+                total = cursor.fetchone()[0]
+
+                cursor.execute(
+                    "SELECT COUNT(*) FROM pm_completions "
+                    "WHERE completion_date >= %s AND completion_date <= %s",
+                    (week_start, week_end))
+                completed_count = cursor.fetchone()[0]
+
+                cursor.execute(
+                    "SELECT COUNT(*) FROM weekly_pm_schedules "
+                    "WHERE week_start_date = %s AND status = 'Cannot Find'",
+                    (week_start,))
+                cannot_find_count = cursor.fetchone()[0]
+
+                remaining = max(0, total - completed_count - cannot_find_count)
+
+                parts = [f"Total Assigned PMs: {total}",
+                         f"Completed: {completed_count}",
+                         f"Remaining: {remaining}"]
+                if cannot_find_count:
+                    parts.append(f"Cannot Find: {cannot_find_count}")
+                self.schedule_summary_var.set("   |   ".join(parts))
+            except Exception as e:
+                print(f"WARNING: Could not compute schedule summary: {e}")
+                self.schedule_summary_var.set("Total Assigned PMs: —")
 
         # Group assignments by technician and populate trees
         for idx, assignment in enumerate(all_assignments):
