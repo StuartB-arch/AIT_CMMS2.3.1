@@ -22637,12 +22637,15 @@ class AITCMMSSystem:
                 tree.delete(item)
 
         # PERFORMANCE OPTIMIZATION: Fetch all schedules in ONE query instead of N separate queries
+        # LEFT JOIN ensures PMs are shown even when the equipment record is missing/deleted
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT ws.bfm_equipment_no, e.description, ws.pm_type, ws.scheduled_date,
+            SELECT ws.bfm_equipment_no,
+                   COALESCE(e.description, '(equipment not found)') AS description,
+                   ws.pm_type, ws.scheduled_date,
                    ws.status, ws.assigned_technician
             FROM weekly_pm_schedules ws
-            JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
+            LEFT JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
             WHERE ws.week_start_date = %s
             ORDER BY ws.assigned_technician, ws.scheduled_date
         ''', (week_start,))
@@ -22691,11 +22694,29 @@ class AITCMMSSystem:
                 print(f"WARNING: Could not compute schedule summary: {e}")
                 self.schedule_summary_var.set("Total Assigned PMs: —")
 
+        # Dynamically create tabs for any technician in this week's schedule
+        # that does not already have a tab (e.g. old schedules with deactivated techs)
+        seen_technicians = {a[5] for a in all_assignments if a[5]}
+        for tech in sorted(seen_technicians - set(self.technician_trees.keys())):
+            tech_frame = ttk.Frame(self.technician_notebook)
+            self.technician_notebook.add(tech_frame, text=tech)
+            tech_tree = ttk.Treeview(tech_frame,
+                                     columns=('BFM', 'Description', 'PM Type', 'Due Date', 'Status'),
+                                     show='headings')
+            tech_tree.heading('BFM', text='BFM Equipment No.')
+            tech_tree.heading('Description', text='Description')
+            tech_tree.heading('PM Type', text='PM Type')
+            tech_tree.heading('Due Date', text='Due Date')
+            tech_tree.heading('Status', text='Status')
+            for col in ('BFM', 'Description', 'PM Type', 'Due Date', 'Status'):
+                tech_tree.column(col, width=150)
+            tech_tree.pack(fill='both', expand=True, padx=5, pady=5)
+            self.technician_trees[tech] = tech_tree
+
         # Group assignments by technician and populate trees
         for idx, assignment in enumerate(all_assignments):
             bfm_no, description, pm_type, scheduled_date, status, technician = assignment
 
-            # Only add to tree if technician exists in our trees dict
             if technician in self.technician_trees:
                 tree = self.technician_trees[technician]
                 tree.insert('', 'end', values=(bfm_no, description, pm_type, scheduled_date, status))
@@ -22703,6 +22724,16 @@ class AITCMMSSystem:
             # Yield to event loop every 20 items to keep UI responsive
             if idx % 20 == 0:
                 self.root.update_idletasks()
+
+        # Update each tab label to show the per-technician PM count
+        for tab_id in self.technician_notebook.tabs():
+            tech_name = self.technician_notebook.tab(tab_id, 'text')
+            # Strip any previous count suffix (e.g. "John (15)") back to base name
+            base_name = tech_name.split(' (')[0]
+            if base_name in self.technician_trees:
+                count = len(self.technician_trees[base_name].get_children())
+                label = f"{base_name} ({count})" if count else base_name
+                self.technician_notebook.tab(tab_id, text=label)
 
         # Final yield to event loop
         self.root.update_idletasks()
@@ -22715,9 +22746,10 @@ class AITCMMSSystem:
             messagebox.showwarning("Warning", "No technician tab selected")
             return
 
-        # Get the technician name from the tab
+        # Get the technician name from the tab (strip count suffix e.g. "John (15)" → "John")
         tab_index = self.technician_notebook.index(current_tab)
-        technician_name = self.technician_notebook.tab(tab_index, "text")
+        tab_text = self.technician_notebook.tab(tab_index, "text")
+        technician_name = tab_text.split(' (')[0]
 
         # Get the selected PM from the tree
         if technician_name not in self.technician_trees:
@@ -22876,10 +22908,15 @@ class AITCMMSSystem:
             # Generate forms for each technician
             for technician in self.technicians:
                 cursor.execute('''
-                    SELECT ws.bfm_equipment_no, e.sap_material_no, e.description, e.tool_id_drawing_no,
-                        e.location, e.master_lin, ws.pm_type, ws.scheduled_date, ws.assigned_technician
+                    SELECT ws.bfm_equipment_no,
+                           COALESCE(e.sap_material_no, '') AS sap_material_no,
+                           COALESCE(e.description, '(equipment not found)') AS description,
+                           COALESCE(e.tool_id_drawing_no, '') AS tool_id_drawing_no,
+                           COALESCE(e.location, '') AS location,
+                           COALESCE(e.master_lin, '') AS master_lin,
+                           ws.pm_type, ws.scheduled_date, ws.assigned_technician
                     FROM weekly_pm_schedules ws
-                    JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
+                    LEFT JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
                     WHERE ws.assigned_technician = %s AND ws.week_start_date = %s
                     ORDER BY ws.scheduled_date
                 ''', (technician, week_start))
@@ -23423,10 +23460,11 @@ class AITCMMSSystem:
             
             cursor = self.conn.cursor()
             cursor.execute('''
-                SELECT ws.assigned_technician, ws.bfm_equipment_no, e.description, 
+                SELECT ws.assigned_technician, ws.bfm_equipment_no,
+                       COALESCE(e.description, '(equipment not found)') AS description,
                        ws.pm_type, ws.scheduled_date, ws.status
                 FROM weekly_pm_schedules ws
-                JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
+                LEFT JOIN equipment e ON ws.bfm_equipment_no = e.bfm_equipment_no
                 WHERE ws.week_start_date = %s
                 ORDER BY ws.assigned_technician, ws.scheduled_date
             ''', (week_start,))
