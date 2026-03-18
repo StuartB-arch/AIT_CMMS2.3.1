@@ -22649,11 +22649,18 @@ class AITCMMSSystem:
 
         all_assignments = cursor.fetchall()
 
-        # Tally counts for the summary label
-        total = len(all_assignments)
-        scheduled_count = sum(1 for a in all_assignments if a[4] == 'Scheduled')
-        completed_count = sum(1 for a in all_assignments if a[4] == 'Completed')
-        other_count = total - scheduled_count - completed_count
+        # Accurate counts from a direct query (avoids JOIN duplicates inflating totals)
+        cursor.execute('''
+            SELECT
+                COUNT(*) AS total,
+                COUNT(CASE WHEN status = 'Scheduled' THEN 1 END) AS scheduled,
+                COUNT(CASE WHEN status = 'Completed' THEN 1 END) AS completed,
+                COUNT(CASE WHEN status NOT IN ('Scheduled', 'Completed') THEN 1 END) AS other
+            FROM weekly_pm_schedules
+            WHERE week_start_date = %s
+        ''', (week_start,))
+        counts = cursor.fetchone()
+        total, scheduled_count, completed_count, other_count = counts if counts else (0, 0, 0, 0)
 
         if hasattr(self, 'schedule_summary_var'):
             parts = [f"Total Assigned PMs: {total}",
