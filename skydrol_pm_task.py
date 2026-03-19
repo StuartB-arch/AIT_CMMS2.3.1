@@ -189,13 +189,16 @@ class SkydrolPMTaskManager:
     def setup(self) -> None:
         """
         Idempotent start-up routine.
-        Ensures the combined equipment record and PM template exist, and
-        removes legacy individual templates for HYD-UNIT-001/002/003.
+        Ensures the combined equipment record and PM template exist, removes
+        legacy individual templates for HYD-UNIT-001/002/003, and disables
+        all PM scheduling flags on those legacy equipment records so the
+        normal round-robin scheduler never picks them up.
         Safe to call on every application launch.
         """
         self._ensure_combined_unit()
         self._ensure_pm_template()
         self._cleanup_legacy_templates()
+        self._disable_legacy_unit_scheduling()
 
     def generate_weekly_skydrol_pm(
         self,
@@ -450,6 +453,60 @@ class SkydrolPMTaskManager:
                 ),
             )
             print(f"INFO [Skydrol]: Created combined PM template for {bfm_no}.")
+
+        self.conn.commit()
+
+    def _disable_legacy_unit_scheduling(self) -> None:
+        """
+        Set all PM-type flags to FALSE for HYD-UNIT-001, HYD-UNIT-002, and
+        HYD-UNIT-003 in the equipment table, and remove any open 'Scheduled'
+        rows for those units from weekly_pm_schedules.
+
+        This prevents the normal round-robin PM scheduler from ever picking
+        up the three individual hydraulic units — all scheduling for those
+        units is handled exclusively by generate_weekly_skydrol_pm() via the
+        combined HYD-UNITS-ALL record.
+
+        Safe to call repeatedly (idempotent): if the flags are already FALSE
+        and there are no open rows, it silently becomes a no-op.
+        """
+        cursor = self.conn.cursor()
+
+        for bfm_no in LEGACY_HYDRAULIC_UNIT_BFMS:
+            # Disable all PM scheduling flags on the legacy equipment record.
+            cursor.execute(
+                """
+                UPDATE equipment
+                SET weekly_pm    = FALSE,
+                    monthly_pm   = FALSE,
+                    six_month_pm = FALSE,
+                    annual_pm    = FALSE
+                WHERE bfm_equipment_no = %s
+                """,
+                (bfm_no,),
+            )
+            if cursor.rowcount:
+                print(
+                    f"INFO [Skydrol]: Disabled all PM flags for legacy unit "
+                    f"{bfm_no} — scheduling is handled by HYD-UNITS-ALL."
+                )
+
+            # Remove any open (Scheduled) schedule rows for the legacy unit
+            # so stale individual assignments cannot remain visible.
+            cursor.execute(
+                """
+                DELETE FROM weekly_pm_schedules
+                WHERE bfm_equipment_no = %s
+                  AND status = 'Scheduled'
+                """,
+                (bfm_no,),
+            )
+            removed = cursor.rowcount
+            if removed:
+                print(
+                    f"INFO [Skydrol]: Removed {removed} open schedule row(s) "
+                    f"for legacy unit {bfm_no}."
+                )
 
         self.conn.commit()
 
